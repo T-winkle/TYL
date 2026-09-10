@@ -23,13 +23,13 @@
   · <a href="#本地开发">参与开发</a>
 </p>
 
-> [!IMPORTANT]
-> 当前公开测试版为 `0.1.0-beta.1`，率先支持 Windows 10 / 11 x64。测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示；请只从本仓库下载并核对 SHA-256。
-
 <p align="center">
   <img src="assets/readme/tyl-light.png" width="49%" alt="TYL 浅色界面">
   <img src="assets/readme/tyl-dark.png" width="49%" alt="TYL 深色界面">
 </p>
+
+> [!IMPORTANT]
+> 当前公开测试版为 `0.1.0-beta.1`，率先支持 Windows 10 / 11 x64。测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示；请只从本仓库下载并核对 SHA-256。
 
 ## 为什么是 TYL
 
@@ -136,10 +136,7 @@ apps/tyl-app/
 ## 当前边界
 
 - 当前只正式支持 Windows 10 / 11 x64。
-- 微信、WPS 等自绘编辑器暴露的 UIA 能力因版本而异；无法安全确认选区时，替换功能会拒绝执行，但复制译文仍然可用。
-- 公开测试版尚未提供自动更新。
-- i18n 暂不在当前阶段范围内。
+- 自绘编辑器应用暴露的 UIA 能力因版本而异；无法安全确认选区时，替换功能会拒绝执行，但复制译文仍然可用。
+- 尚未提供自动更新。
 
-## License
 
-TYL 使用 [MIT License](LICENSE) 开源。
