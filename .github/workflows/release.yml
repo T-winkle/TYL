@@ -86,11 +86,11 @@ jobs:
       - name: Build release artifacts
         shell: pwsh
         run: |
-          $buildArguments = @()
+          $buildArguments = @{}
           if ([string]::IsNullOrWhiteSpace($env:TYL_SIGNING_CONFIG)) {
-            $buildArguments += '-AllowUnsigned'
+            $buildArguments.AllowUnsigned = $true
           } else {
-            $buildArguments += @('-AdditionalTauriConfig', $env:TYL_SIGNING_CONFIG)
+            $buildArguments.AdditionalTauriConfig = $env:TYL_SIGNING_CONFIG
           }
           & .\scripts\build-release.ps1 @buildArguments
 
