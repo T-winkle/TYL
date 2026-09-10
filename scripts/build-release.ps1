@@ -56,6 +56,12 @@ if (-not (Test-Path -LiteralPath $tauriCommand)) {
     throw "Tauri CLI was not installed at $tauriCommand"
 }
 
+# tauri::generate_context!() validates frontendDist at Rust compile time, so
+# the frontend output must exist before workspace-wide Clippy and tests run.
+Invoke-ReleaseStep 'Build frontend assets for Rust checks' {
+    npm --prefix $uiDirectory run build
+}
+
 if (-not $SkipChecks) {
     Invoke-ReleaseStep 'Check Rust formatting' {
         cargo fmt --manifest-path (Join-Path $repoRoot 'Cargo.toml') --all --check
