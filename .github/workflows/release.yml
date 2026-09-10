@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/tyl-app/ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag and application version
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/tyl-app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $expectedTag = "v$version"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag $env:GITHUB_REF_NAME does not match application version $version. Expected $expectedTag."
+          }
+
+      - name: Prepare optional Authenticode certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+
+          if (-not $hasCertificate -and -not $hasPassword) {
+            Write-Host 'No Authenticode certificate configured; this release will be unsigned.'
+            'TYL_RELEASE_SIGNED=false' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            exit 0
+          }
+          if ($hasCertificate -ne $hasPassword) {
+            throw 'Configure both WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD, or leave both unset.'
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'tyl-code-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password)
+          } finally {
+            if (Test-Path -LiteralPath $certificatePath) {
+              [IO.File]::Delete($certificatePath)
+            }
+          }
+
+          $signingCertificate = $imported | Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $signingCertificate) {
+            throw 'The imported PFX did not contain a certificate with a private key.'
+          }
+
+          $signingConfigPath = Join-Path $env:RUNNER_TEMP 'tauri-signing.conf.json'
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $signingCertificate.Thumbprint
+                digestAlgorithm = 'sha256'
+                timestampUrl = 'http://timestamp.digicert.com'
+              }
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $signingConfigPath -Encoding utf8NoBOM
+          "TYL_SIGNING_CONFIG=$signingConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          'TYL_RELEASE_SIGNED=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release artifacts
+        shell: pwsh
+        run: |
+          $buildArguments = @()
+          if ([string]::IsNullOrWhiteSpace($env:TYL_SIGNING_CONFIG)) {
+            $buildArguments += '-AllowUnsigned'
+          } else {
+            $buildArguments += @('-AdditionalTauriConfig', $env:TYL_SIGNING_CONFIG)
+          }
+          & .\scripts\build-release.ps1 @buildArguments
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content apps/tyl-app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $artifactDirectory = Resolve-Path "target/release-artifacts/$version"
+          $assets = @(Get-ChildItem -LiteralPath $artifactDirectory -File | ForEach-Object FullName)
+          if ($assets.Count -ne 3) {
+            throw "Expected setup, portable ZIP, and checksums; found $($assets.Count) files."
+          }
+
+          $releaseNotesPath = Join-Path $env:RUNNER_TEMP 'tyl-release-notes.md'
+          $releaseNotes = Get-Content 'CHANGELOG.md' -Raw
+          if ($env:TYL_RELEASE_SIGNED -ne 'true') {
+            $unsignedNotice = @'
+          > [!WARNING]
+          > 此测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示。请只从本仓库下载，并使用 `SHA256SUMS.txt` 校验文件。
+
+          '@
+            $releaseNotes = $unsignedNotice + $releaseNotes
+          }
+          Set-Content -LiteralPath $releaseNotesPath -Value $releaseNotes -Encoding utf8NoBOM
+
+          $arguments = @(
+            'release', 'create', $env:GITHUB_REF_NAME
+          ) + $assets + @(
+            '--verify-tag',
+            '--title', "TYL $version",
+            '--notes-file', $releaseNotesPath
+          )
+          if ($version.Contains('-')) {
+            $arguments += '--prerelease'
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release creation failed with exit code $LASTEXITCODE."
+          }

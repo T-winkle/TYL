@@ -1,0 +1,38 @@
+[package]
+name = "tyl-app"
+description = "TYL translation popup app (Tauri shell)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "tyl-app"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+tyl-core = { workspace = true }
+tyl-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2.3"
+tauri-plugin-autostart = "2.5"
+tauri-plugin-single-instance = "2.4"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+webview2-com = "0.38.2"
+
+[features]
+# 生产构建走 custom protocol（资源内嵌），dev 走 vite server
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Opt-in local benchmark driver; excluded from normal production builds.
+memory-bench = []

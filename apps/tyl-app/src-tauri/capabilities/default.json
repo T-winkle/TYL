@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "popup 窗口的最小权限：事件 + 核心调用",
+  "windows": ["popup"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging"
+  ]
+}

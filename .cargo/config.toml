@@ -1,0 +1,6 @@
+# 交叉构建 Windows 时的默认配置
+
+[target.x86_64-pc-windows-msvc]
+# 静态链接 CRT：产物零外部依赖（无 VCRUNTIME140.dll），
+# 拷到任意 Win10/11 即可运行。LNK4099 警告无害（SDK .lib 不带 PDB）。
+rustflags = ["-C", "target-feature=+crt-static"]

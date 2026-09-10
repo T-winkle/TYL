@@ -1,0 +1,106 @@
+:root {
+  --bg: #f4f5f3;
+  --panel: #fcfdfa;
+  --panel-soft: #f0f2ee;
+  --panel-elevated: #fff;
+  --fg: #252e2b;
+  --fg-secondary: #65706a;
+  --fg-tertiary: #87918a;
+  --divider: #e3e8e1;
+  --accent: #286c56;
+  --accent-press: #205a48;
+  --accent-wash: #e8f1eb;
+  --hover: #edf1eb;
+  --input-bg: #f8faf6;
+  --ok: #327657;
+  --warn: #a77724;
+  --error: #bd4f46;
+  --font:
+    "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui,
+    sans-serif;
+  --ease-pop: cubic-bezier(0.16, 1, 0.3, 1);
+}
+:root[data-theme="dark"] {
+  --bg: #171c1b;
+  --panel: #202725;
+  --panel-soft: #272f2c;
+  --panel-elevated: #222a27;
+  --fg: #e8ede7;
+  --fg-secondary: #abb7ae;
+  --fg-tertiary: #839187;
+  --divider: #34403a;
+  --accent: #9bc7ac;
+  --accent-press: #b2d8bd;
+  --accent-wash: #2c4035;
+  --hover: #2a352f;
+  --input-bg: #1c231f;
+  --ok: #9bc7ac;
+  --warn: #d9b470;
+  --error: #ee9b90;
+}
+:root[data-scheme="indigo"] {
+  --accent: #465f99;
+  --accent-press: #394f82;
+  --accent-wash: #e9edf7;
+  --hover: #edf0f5;
+}
+:root[data-scheme="plum"] {
+  --accent: #765a74;
+  --accent-press: #624a60;
+  --accent-wash: #f1eaf0;
+  --hover: #f2edef;
+}
+:root[data-theme="dark"][data-scheme="indigo"] {
+  --accent: #a9bbe8;
+  --accent-press: #c1cef0;
+  --accent-wash: #29344d;
+  --hover: #29313f;
+}
+:root[data-theme="dark"][data-scheme="plum"] {
+  --accent: #d2afca;
+  --accent-press: #dfc1d8;
+  --accent-wash: #443342;
+  --hover: #382f37;
+}
+* {
+  box-sizing: border-box;
+}
+button,
+input {
+  font: inherit;
+}
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+::selection {
+  background: color-mix(in srgb, var(--accent) 23%, transparent);
+}
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-tertiary) 45%, transparent);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "tyl-platform"
+description = "Platform backends for TYL (capture/locator/anchor)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tyl-core = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

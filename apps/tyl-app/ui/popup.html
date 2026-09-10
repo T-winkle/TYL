@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TYL</title>
+    <style>
+      /* 透明窗口基座：外层 1px 间隙留给阴影 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // JS 运行时错误桥：任何未捕获异常都写进后端日志（生产无 devtools）
+      window.onerror = (msg, src, line, col, err) => {
+        fetch("/js-error?" + encodeURIComponent(`${msg} @ ${src}:${line}:${col}`)).catch(() => {});
+        console.error("[popup JS错误]", msg, err);
+      };
+    </script>
+    <script type="module" src="/src/popup/main.tsx"></script>
+  </body>
+</html>

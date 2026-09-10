@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: Core lint & test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (tyl-core, native)
+        run: cargo clippy -p tyl-core --all-targets -- -D warnings
+      - name: Test (tyl-core)
+        run: cargo test -p tyl-core
+      # The Windows job below checks the complete workspace. Cross-checking the
+      # MSVC target on Ubuntu is both redundant and fragile because native
+      # dependencies such as ring require a Windows-compatible C toolchain.
+
+  windows:
+    name: Build & smoke (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test -p tyl-core
+      - name: Build CLI (release)
+        run: cargo build --release -p tyl-cli
+      # Smoke: anchor/monitors need a real desktop session; capture is
+      # interactive (needs a selection), so only verify the binary runs.
+      - name: Smoke test
+        run: |
+          $exe = "target/release/tyl-cli.exe"
+          & $exe 2>&1 | Select-Object -First 3
+          if ($LASTEXITCODE -ne 2) { throw "expected usage exit code 2, got $LASTEXITCODE" }
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tyl-cli-windows
+          path: target/release/tyl-cli.exe
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build frontend
+        run: npm --prefix apps/tyl-app/ui ci && npm --prefix apps/tyl-app/ui run build
+      - name: Build app (release)
+        run: cargo build --release -p tyl-app
+      - name: Bundle NSIS installer
+        working-directory: apps/tyl-app
+        run: .\ui\node_modules\.bin\tauri.cmd bundle --bundles nsis
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tyl-app-windows
+          path: |
+            target/release/tyl-app.exe
+            target/release/bundle/nsis/*-setup.exe

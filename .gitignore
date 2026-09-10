@@ -1,0 +1,17 @@
+/target
+node_modules/
+dist/
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+settings.json
+/docs/
+.playwright-cli/
+output/playwright/

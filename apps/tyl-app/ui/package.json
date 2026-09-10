@@ -1,0 +1,21 @@
+{
+  "name": "tyl-ui",
+  "private": true,
+  "version": "0.1.0-beta.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "solid-js": "^1.9.15"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "typescript": "^5.9.2",
+    "vite": "^8.2.2",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}
