@@ -128,6 +128,8 @@ export function Settings() {
   let restoreScrollFrame = 0;
   let contentScroll: HTMLDivElement | undefined;
   let removeContextMenu = () => {};
+  let removeWindowDrag = () => {};
+  let dragOrigin: { x: number; y: number } | undefined;
   const scrollOffsets: Record<Tab, number> = {
     general: 0,
     translate: 0,
@@ -136,6 +138,17 @@ export function Settings() {
   };
   let removeRecording: (() => void) | undefined;
   const dirty = () => Boolean(s()) && JSON.stringify(s()) !== saved();
+  const beginWindowDrag = (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest("button, input, select, textarea, a, [role='button']")
+    )
+      return;
+    event.preventDefault();
+    dragOrigin = { x: event.clientX, y: event.clientY };
+  };
   createEffect(() => {
     if (s()) applyTheme(s()!.theme ?? "system", s()!.color_scheme ?? "indigo");
   });
@@ -143,11 +156,39 @@ export function Settings() {
     window.clearTimeout(statusTimer);
     window.cancelAnimationFrame(restoreScrollFrame);
     removeContextMenu();
+    removeWindowDrag();
     removeRecording?.();
   });
 
   onMount(async () => {
     removeContextMenu = installContextMenuGuard();
+    const cancelDrag = () => {
+      dragOrigin = undefined;
+    };
+    const moveDrag = (event: PointerEvent) => {
+      if (!dragOrigin) return;
+      if (!(event.buttons & 1)) {
+        cancelDrag();
+        return;
+      }
+      if (
+        Math.hypot(event.clientX - dragOrigin.x, event.clientY - dragOrigin.y) <
+        4
+      )
+        return;
+      cancelDrag();
+      void getCurrentWindow()
+        .startDragging()
+        .catch((e) => showError(`移动窗口失败: ${String(e)}`));
+    };
+    window.addEventListener("pointermove", moveDrag);
+    window.addEventListener("pointerup", cancelDrag);
+    window.addEventListener("pointercancel", cancelDrag);
+    removeWindowDrag = () => {
+      window.removeEventListener("pointermove", moveDrag);
+      window.removeEventListener("pointerup", cancelDrag);
+      window.removeEventListener("pointercancel", cancelDrag);
+    };
     try {
       const initial = await invoke<SettingsData>("get_settings");
       setS(initial);
@@ -331,8 +372,8 @@ export function Settings() {
         {(cur) => (
           <div class="settings">
             {/* 侧边导航 */}
-            <nav class="nav">
-              <div class="nav-brand" data-tauri-drag-region>
+            <nav class="nav" onPointerDown={beginWindowDrag}>
+              <div class="nav-brand" title="拖动此处移动窗口">
                 <img class="nav-logo" src={logo} alt="TYL 标志" />
                 <div class="nav-brand-copy">
                   <div class="nav-title">TYL</div>
@@ -364,8 +405,11 @@ export function Settings() {
 
             {/* 内容区 */}
             <div class="content">
-              <header class="page-header">
-                <div class="page-head" data-tauri-drag-region>
+              <header
+                class="page-header"
+                onPointerDown={beginWindowDrag}
+              >
+                <div class="page-head" title="拖动此处移动窗口">
                   <div class="page-eyebrow">{PAGE_META[tab()].eyebrow}</div>
                   <h1>{PAGE_META[tab()].title}</h1>
                   <p>{PAGE_META[tab()].desc}</p>

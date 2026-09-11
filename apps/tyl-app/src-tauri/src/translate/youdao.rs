@@ -245,6 +245,31 @@ fn parse_translation(v: &Value) -> Result<String, String> {
             return Ok(tran.to_string());
         }
     }
+    // 单词和常见短语经常不返回 fanyi，而是进入网页翻译结果。
+    // 只接受 @same 标记的精确词条及其第一条译文，避免误取后面的
+    // 联想词条；这与 ec.word 的词典释义不同，可以安全用于引擎译文。
+    if let Some(entries) = v
+        .pointer("/web_trans/web-translation")
+        .and_then(Value::as_array)
+    {
+        let exact = entries.iter().find(|entry| {
+            entry
+                .get("@same")
+                .is_some_and(|same| same.as_str() == Some("true") || same.as_bool() == Some(true))
+        });
+        if let Some(tran) = exact
+            .and_then(|entry| entry.get("trans"))
+            .and_then(Value::as_array)
+            .and_then(|translations| {
+                translations
+                    .iter()
+                    .filter_map(|translation| translation.get("value").and_then(Value::as_str))
+                    .find(|value| !value.trim().is_empty())
+            })
+        {
+            return Ok(tran.trim().to_string());
+        }
+    }
     // Do not reinterpret ec.word as a text translation. Dictionary cards
     // consume that structure separately; doing it here duplicates dictionary
     // senses in the "engine translation" tab for single words.
@@ -334,10 +359,52 @@ mod tests {
         assert!(result.contains("7391"), "translation lost the final marker");
     }
 
+    #[tokio::test]
+    #[ignore = "Opt-in: sends fixed public word and phrase fixtures to Youdao"]
+    async fn word_and_phrase_live_smoke() {
+        for (source, target) in [
+            ("hello", "zh-CN"),
+            ("hello world", "zh-CN"),
+            ("How are you?", "zh-CN"),
+            ("你好", "en"),
+        ] {
+            let result = translate(source, target).await.unwrap();
+            assert!(!result.trim().is_empty(), "empty translation for {source}");
+        }
+    }
+
     #[test]
-    fn text_translation_never_falls_back_to_dictionary_senses() {
+    fn text_translation_uses_exact_web_result_but_not_dictionary_senses() {
         let word = serde_json::json!({"trs":[{"pos":"v.","tran":"考虑；认为"}]});
         assert!(parse_translation(&serde_json::json!({"ec":{"word":word}})).is_err());
+        let phrase = serde_json::json!({
+            "web_trans": {
+                "web-translation": [
+                    {
+                        "@same": "true",
+                        "key": "hello world",
+                        "trans": [
+                            {"value": "你好世界"},
+                            {"value": "世界你好"}
+                        ]
+                    },
+                    {
+                        "key": "Hello Kitty World",
+                        "trans": [{"value": "凯蒂猫气球世界"}]
+                    }
+                ]
+            }
+        });
+        assert_eq!(parse_translation(&phrase).unwrap(), "你好世界");
+        let suggestions_only = serde_json::json!({
+            "web_trans": {
+                "web-translation": [{
+                    "key": "related phrase",
+                    "trans": [{"value": "不应采用"}]
+                }]
+            }
+        });
+        assert!(parse_translation(&suggestions_only).is_err());
         assert_eq!(
             parse_translation(&serde_json::json!({"fanyi":{"tran":"第一行\n最后一行"}})).unwrap(),
             "第一行\n最后一行"
