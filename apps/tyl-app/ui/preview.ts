@@ -5,11 +5,13 @@ const query = new URLSearchParams(location.search);
 mockWindows(query.get("page") === "settings" ? "settings" : "popup");
 const theme = query.get("theme") ?? "light";
 const colorScheme = query.get("scheme") ?? "indigo";
+const language = query.get("lang") ?? "zh-CN";
 const scenario = query.get("case") ?? "dict";
 const engines = query.get("allEngines") === "true"
   ? ["bing", "youdao", "transmart", "yandex", "iciba", "google", "mymemory", "llm"]
   : ["bing", "youdao", "transmart"];
 const cfg = {
+  language,
   hotkey: "alt+t",
   engines,
   result_display: "tabs",
@@ -34,7 +36,7 @@ mockIPC(
     calls.push({ command, args });
     if (command === "get_settings") return structuredClone(cfg);
     if (command === "get_autostart") return false;
-    if (command === "test_llm") return query.get("testError") === "true" ? Promise.reject("AI HTTP 401：API Key 无效或已过期") : "连接成功，已收到译文（0.2 秒）";
+    if (command === "test_llm") return query.get("testError") === "true" ? Promise.reject("AI HTTP 401：API Key 无效或已过期") : 200;
     if (command === "get_gpu_status") return { requested: false, software: true, external_override: false };
     if (command === "save_settings") Object.assign(cfg, args?.settings);
     if (command === "replace_selection" && query.get("replaceHidden") === "true")
@@ -80,6 +82,7 @@ if (query.get("page") === "settings") {
     grow_upward: false,
     theme,
     color_scheme: colorScheme,
+    language,
     show_source: query.get("sourceText") === "true",
     is_word: isWord,
     dictionary: true,

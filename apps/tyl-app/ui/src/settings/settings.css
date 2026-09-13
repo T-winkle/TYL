@@ -248,6 +248,15 @@ body {
 .dictionary-select-wrap {
   width: 154px;
 }
+.language-select-wrap {
+  width: 154px;
+}
+.language-select {
+  width: 100%;
+  padding-right: 34px;
+  appearance: none;
+  cursor: pointer;
+}
 .dictionary-select {
   width: 100%;
   padding-right: 34px;

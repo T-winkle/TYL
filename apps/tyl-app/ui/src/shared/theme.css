@@ -62,6 +62,37 @@
   --accent-wash: #443342;
   --hover: #382f37;
 }
+:root {
+  --logo-bg: #286c56;
+  --logo-detail: #a5d0bd;
+  --logo-fg: #f7faf9;
+}
+:root[data-scheme="indigo"] {
+  --logo-bg: #465f99;
+  --logo-detail: #b3c2e8;
+}
+:root[data-scheme="plum"] {
+  --logo-bg: #765a74;
+  --logo-detail: #dbbad3;
+}
+.tyl-logo {
+  display: block;
+  overflow: visible;
+}
+.tyl-logo-bg,
+.tyl-logo-detail,
+.tyl-logo-fg {
+  transition: fill 180ms var(--ease-pop);
+}
+.tyl-logo-bg {
+  fill: var(--logo-bg);
+}
+.tyl-logo-detail {
+  fill: var(--logo-detail);
+}
+.tyl-logo-fg {
+  fill: var(--logo-fg);
+}
 * {
   box-sizing: border-box;
 }

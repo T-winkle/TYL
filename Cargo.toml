@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 futures-util = "0.3"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Media_Speech",
     "Win32_System_Com",

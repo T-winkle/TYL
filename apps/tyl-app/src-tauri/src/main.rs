@@ -8,6 +8,7 @@
 mod commands;
 mod desktop_actions;
 mod gpu;
+mod i18n;
 mod logger;
 #[cfg(feature = "memory-bench")]
 mod memory_bench;
@@ -126,15 +127,14 @@ fn main() {
                 // 托盘：设置 + 退出。
                 let quit_app = app.handle().clone();
                 let settings_app = app.handle().clone();
+                let language = settings::current().language;
                 let mut tray = TrayIconBuilder::with_id("main")
-                    .tooltip("TYL 划词翻译（右键菜单）")
-                    .menu(
-                        &tauri::menu::MenuBuilder::new(app)
-                            .text("settings", "设置…")
-                            .separator()
-                            .text("quit", "退出")
-                            .build()?,
-                    )
+                    .tooltip(i18n::text(
+                        &language,
+                        "TYL 划词翻译（右键菜单）",
+                        "TYL Selection Translator (right-click for menu)",
+                    ))
+                    .menu(&build_tray_menu(app.handle(), &language)?)
                     .show_menu_on_left_click(false)
                     .on_menu_event(move |_app, event| match event.id.as_ref() {
                         "quit" => {
@@ -213,12 +213,13 @@ pub fn open_settings_window(app: &tauri::AppHandle) {
         let _ = w.set_focus();
         return;
     }
+    let language = settings::current().language;
     let _ = tauri::WebviewWindowBuilder::new(
         app,
         "settings",
         tauri::WebviewUrl::App("/settings.html".into()),
     )
-    .title("TYL 设置")
+    .title(i18n::text(&language, "TYL 设置", "TYL Settings"))
     .decorations(false)
     .shadow(true)
     .inner_size(960.0, 740.0)
@@ -227,4 +228,30 @@ pub fn open_settings_window(app: &tauri::AppHandle) {
     .minimizable(false)
     .center()
     .build();
+}
+
+fn build_tray_menu(
+    app: &tauri::AppHandle,
+    language: &str,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    tauri::menu::MenuBuilder::new(app)
+        .text("settings", i18n::text(language, "设置…", "Settings…"))
+        .separator()
+        .text("quit", i18n::text(language, "退出", "Quit"))
+        .build()
+}
+
+pub(crate) fn refresh_tray_i18n(app: &tauri::AppHandle) {
+    let language = settings::current().language;
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    if let Ok(menu) = build_tray_menu(app, &language) {
+        let _ = tray.set_menu(Some(menu));
+    }
+    let _ = tray.set_tooltip(Some(i18n::text(
+        &language,
+        "TYL 划词翻译（右键菜单）",
+        "TYL Selection Translator (right-click for menu)",
+    )));
 }

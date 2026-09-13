@@ -9,9 +9,15 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon, type IconName } from "../shared/Icon";
+import { Logo } from "../shared/Logo";
 import { applyTheme, type ColorScheme, type Theme } from "../shared/theme";
 import { installContextMenuGuard } from "../shared/contextMenu";
-import logo from "../shared/logo.svg";
+import {
+  applyLanguage,
+  localizedError,
+  tr,
+  type LanguagePreference,
+} from "../shared/i18n";
 
 interface Llm {
   enabled: boolean;
@@ -28,6 +34,7 @@ interface DictionarySettings {
   provider: "auto" | "youdao" | "iciba" | "bing";
 }
 interface SettingsData {
+  language: LanguagePreference;
   hotkey: string;
   /** 有序启用引擎；第一个 = 主引擎（弹窗 tab 顺序同此） */
   engines: string[];
@@ -51,22 +58,37 @@ interface GpuStatus {
 type Tab = "general" | "translate" | "network" | "llm";
 
 /** 引擎元数据（标签+说明）。顺序即追加时的展示顺序。 */
-const ENGINE_META: Record<string, { label: string; desc: string }> = {
-  bing: { label: "必应", desc: "通用文本与日常阅读" },
-  youdao: { label: "有道", desc: "短文本翻译，免配置内部接口" },
-  transmart: { label: "腾讯", desc: "长句与技术文本" },
-  yandex: { label: "Yandex", desc: "多语言及长文翻译，免配置" },
-  iciba: { label: "金山", desc: "中短文本，国内访问较快" },
-  google: { label: "Google", desc: "多语言翻译，部分网络需代理" },
-  mymemory: { label: "MyMemory", desc: "社区翻译记忆库" },
-  llm: { label: "AI", desc: "自配大模型，流式输出（见 AI 模型页）" },
-};
-const ALL_ENGINE_IDS = Object.keys(ENGINE_META);
-const PALETTES: { id: ColorScheme; label: string }[] = [
-  { id: "jade", label: "松石" },
-  { id: "indigo", label: "靛蓝" },
-  { id: "plum", label: "岩紫" },
+const ALL_ENGINE_IDS = [
+  "bing",
+  "youdao",
+  "transmart",
+  "yandex",
+  "iciba",
+  "google",
+  "mymemory",
+  "llm",
 ];
+
+function engineMeta(id: string): { label: string; desc: string } {
+  return {
+    bing: { label: tr("必应", "Bing"), desc: tr("通用文本与日常阅读", "General text and everyday reading") },
+    youdao: { label: tr("有道", "Youdao"), desc: tr("短文本翻译，免配置内部接口", "Short text via a key-free internal endpoint") },
+    transmart: { label: tr("腾讯", "Tencent"), desc: tr("长句与技术文本", "Long sentences and technical text") },
+    yandex: { label: "Yandex", desc: tr("多语言及长文翻译，免配置", "Key-free multilingual and long-text translation") },
+    iciba: { label: tr("金山", "Kingsoft"), desc: tr("中短文本，国内访问较快", "Short and medium text; fast access in China") },
+    google: { label: "Google", desc: tr("多语言翻译，部分网络需代理", "Multilingual translation; some networks require a proxy") },
+    mymemory: { label: "MyMemory", desc: tr("社区翻译记忆库", "Community translation memory") },
+    llm: { label: "AI", desc: tr("自配大模型，流式输出（见 AI 模型页）", "Bring your own model with streaming output") },
+  }[id] ?? { label: id, desc: "" };
+}
+
+function palettes(): { id: ColorScheme; label: string }[] {
+  return [
+    { id: "jade", label: tr("松石", "Jade") },
+    { id: "indigo", label: tr("靛蓝", "Indigo") },
+    { id: "plum", label: tr("岩紫", "Plum") },
+  ];
+}
 
 function formatHotkey(value: string) {
   const names: Record<string, string> = {
@@ -82,29 +104,30 @@ function formatHotkey(value: string) {
     .join("+");
 }
 
-const PAGE_META: Record<Tab, { eyebrow: string; title: string; desc: string }> =
-  {
+function pageMeta(tab: Tab): { eyebrow: string; title: string; desc: string } {
+  return {
     general: {
       eyebrow: "GENERAL",
-      title: "通用",
-      desc: "管理划词方式、快捷键与系统行为",
+      title: tr("通用", "General"),
+      desc: tr("管理划词方式、快捷键与系统行为", "Manage capture, shortcuts, and system behavior"),
     },
     translate: {
       eyebrow: "TRANSLATION",
-      title: "翻译",
-      desc: "选择结果布局并安排翻译引擎优先级",
+      title: tr("翻译", "Translation"),
+      desc: tr("选择结果布局并安排翻译引擎优先级", "Choose a result layout and translation engine priority"),
     },
     network: {
       eyebrow: "NETWORK",
-      title: "网络",
-      desc: "配置翻译服务使用的连接与代理方式",
+      title: tr("网络", "Network"),
+      desc: tr("配置翻译服务使用的连接与代理方式", "Configure connectivity and proxy settings"),
     },
     llm: {
       eyebrow: "AI MODEL",
-      title: "AI 模型",
-      desc: "接入兼容 OpenAI 协议的大语言模型",
+      title: tr("AI 模型", "AI Model"),
+      desc: tr("接入兼容 OpenAI 协议的大语言模型", "Connect an OpenAI-compatible language model"),
     },
-  };
+  }[tab];
+}
 
 export function Settings() {
   const [s, setS] = createSignal<SettingsData | null>(null);
@@ -150,7 +173,10 @@ export function Settings() {
     dragOrigin = { x: event.clientX, y: event.clientY };
   };
   createEffect(() => {
-    if (s()) applyTheme(s()!.theme ?? "system", s()!.color_scheme ?? "indigo");
+    if (!s()) return;
+    applyLanguage(s()!.language ?? "system");
+    applyTheme(s()!.theme ?? "system", s()!.color_scheme ?? "indigo");
+    document.title = tr("TYL 设置", "TYL Settings");
   });
   onCleanup(() => {
     window.clearTimeout(statusTimer);
@@ -179,7 +205,7 @@ export function Settings() {
       cancelDrag();
       void getCurrentWindow()
         .startDragging()
-        .catch((e) => showError(`移动窗口失败: ${String(e)}`));
+        .catch((e) => showError(localizedError(e, "Could not move the window")));
     };
     window.addEventListener("pointermove", moveDrag);
     window.addEventListener("pointerup", cancelDrag);
@@ -191,13 +217,14 @@ export function Settings() {
     };
     try {
       const initial = await invoke<SettingsData>("get_settings");
+      applyLanguage(initial.language ?? "system");
       setS(initial);
       setSaved(JSON.stringify(initial));
       setSavedGpu(initial.gpu_acceleration ?? false);
       setGpuStatus(await invoke<GpuStatus>("get_gpu_status"));
       setAutostart(await invoke<boolean>("get_autostart"));
     } catch (e) {
-      showError(`加载失败: ${String(e)}`);
+      showError(localizedError(e, "Could not load settings"));
     }
   });
 
@@ -205,10 +232,10 @@ export function Settings() {
     setAutostart(on);
     try {
       await invoke("set_autostart", { enabled: on });
-      flashStatus(on ? "开机自启已开启" : "开机自启已关闭");
+      flashStatus(on ? tr("开机自启已开启", "Launch at startup enabled") : tr("开机自启已关闭", "Launch at startup disabled"));
     } catch (e) {
       setAutostart(!on);
-      showError(`自启设置失败: ${String(e)}`);
+      showError(localizedError(e, "Could not update startup setting"));
     }
   };
 
@@ -226,7 +253,7 @@ export function Settings() {
   };
 
   const patch = (p: Partial<SettingsData>) => {
-    if (p.llm) setLlmTest(null);
+    if (p.llm || p.language) setLlmTest(null);
     window.clearTimeout(statusTimer);
     setStatus("");
     setStatusError(false);
@@ -243,10 +270,13 @@ export function Settings() {
     setTestingLlm(true);
     setLlmTest(null);
     try {
-      const text = await invoke<string>("test_llm", { config });
+      const elapsedMs = await invoke<number>("test_llm", { config });
+      const text = `${tr("连接成功，已收到译文", "Connected and received a translation")} (${(elapsedMs / 1000).toFixed(1)} ${tr("秒", "s")})`;
       if (JSON.stringify(config) === JSON.stringify(s()!.llm)) setLlmTest({ text, error: false });
     } catch (error) {
-      if (JSON.stringify(config) === JSON.stringify(s()!.llm)) setLlmTest({ text: String(error), error: true });
+      if (JSON.stringify(config) === JSON.stringify(s()!.llm)) {
+        setLlmTest({ text: localizedError(error, "Could not connect to the AI provider"), error: true });
+      }
     } finally { setTestingLlm(false); }
   };
 
@@ -273,8 +303,19 @@ export function Settings() {
     const cur = s();
     if (!cur || saving()) return;
     if (!cur.hotkey.trim()) {
-      showError("热键不能为空");
+      showError(tr("热键不能为空", "The shortcut cannot be empty"));
       return;
+    }
+    if (cur.proxy.mode === "manual") {
+      const proxy = cur.proxy.url.trim();
+      if (!proxy) {
+        showError(tr("代理地址不能为空（或改用其他模式）", "Enter a proxy address or choose another mode"));
+        return;
+      }
+      if (!/^(https?|socks5):\/\//i.test(proxy)) {
+        showError(tr("代理地址需以 http://、https:// 或 socks5:// 开头", "The proxy address must start with http://, https://, or socks5://"));
+        return;
+      }
     }
     try {
       setSaving(true);
@@ -283,9 +324,11 @@ export function Settings() {
       await invoke("save_settings", { settings: cur });
       setSaved(JSON.stringify(cur));
       setSavedGpu(cur.gpu_acceleration);
-      flashStatus(restartRequired() ? "已保存，重启后切换渲染模式" : "设置已保存");
+      flashStatus(restartRequired()
+        ? tr("已保存，重启后切换渲染模式", "Saved. Restart TYL to change rendering mode")
+        : tr("设置已保存", "Settings saved"));
     } catch (e) {
-      showError(`保存失败: ${String(e)}`);
+      showError(localizedError(e, "Could not save settings"));
     } finally {
       setSaving(false);
     }
@@ -312,12 +355,12 @@ export function Settings() {
       const key = /^[a-z0-9]$/i.test(k) ? k.toLowerCase() : k;
       if (/^[a-z0-9]$/.test(key) || /^F\d{1,2}$/.test(key)) {
         if (mods.length === 0 && /^[a-z]$/.test(key)) {
-          showError("请加至少一个修饰键（Ctrl/Alt/Shift）");
+          showError(tr("请加至少一个修饰键（Ctrl/Alt/Shift）", "Add at least one modifier (Ctrl/Alt/Shift)"));
           return;
         }
         patch({ hotkey: [...mods, key].join("+") });
       } else {
-        showError(`不支持的键: ${k}`);
+        showError(`${tr("不支持的键", "Unsupported key")}: ${k}`);
       }
       setRecording(false);
       window.removeEventListener("keydown", onKey, true);
@@ -342,11 +385,11 @@ export function Settings() {
     });
   };
 
-  const TABS: { id: Tab; label: string; icon: IconName }[] = [
-    { id: "general", label: "通用", icon: "settings" },
-    { id: "translate", label: "翻译", icon: "translate" },
-    { id: "network", label: "网络", icon: "network" },
-    { id: "llm", label: "AI 模型", icon: "ai" },
+  const tabs = (): { id: Tab; label: string; icon: IconName }[] => [
+    { id: "general", label: tr("通用", "General"), icon: "settings" },
+    { id: "translate", label: tr("翻译", "Translation"), icon: "translate" },
+    { id: "network", label: tr("网络", "Network"), icon: "network" },
+    { id: "llm", label: tr("AI 模型", "AI Model"), icon: "ai" },
   ];
 
   return (
@@ -354,12 +397,12 @@ export function Settings() {
       <div class="window-chrome">
         <button
           class="window-close"
-          aria-label="关闭设置"
-          title="关闭设置"
+          aria-label={tr("关闭设置", "Close settings")}
+          title={tr("关闭设置", "Close settings")}
           onClick={() =>
             void getCurrentWindow()
               .close()
-              .catch((e) => showError(`关闭失败: ${String(e)}`))
+              .catch((e) => showError(localizedError(e, "Could not close the settings window")))
           }
         >
           <Icon name="close" size={16} />
@@ -367,21 +410,21 @@ export function Settings() {
       </div>
       <Show
         when={s()}
-        fallback={<div class="loading">{status() || "正在加载设置…"}</div>}
+        fallback={<div class="loading">{status() || tr("正在加载设置…", "Loading settings…")}</div>}
       >
         {(cur) => (
           <div class="settings">
             {/* 侧边导航 */}
             <nav class="nav" onPointerDown={beginWindowDrag}>
-              <div class="nav-brand" title="拖动此处移动窗口">
-                <img class="nav-logo" src={logo} alt="TYL 标志" />
+              <div class="nav-brand" title={tr("拖动此处移动窗口", "Drag here to move the window")}>
+                <Logo class="nav-logo" label={tr("TYL 标志", "TYL logo")} />
                 <div class="nav-brand-copy">
                   <div class="nav-title">TYL</div>
-                  <div class="nav-sub">划词翻译</div>
+                  <div class="nav-sub">{tr("划词翻译", "Selection Translator")}</div>
                 </div>
               </div>
               <div class="nav-items">
-                <For each={TABS}>
+                <For each={tabs()}>
                   {(t) => (
                     <button
                       classList={{ active: tab() === t.id }}
@@ -398,7 +441,7 @@ export function Settings() {
                 </For>
               </div>
               <div class="nav-footer">
-                <span>阅读，不止一种语言</span>
+                <span>{tr("阅读，不止一种语言", "Read beyond one language")}</span>
                 <small>TYL · 0.1.0</small>
               </div>
             </nav>
@@ -409,10 +452,10 @@ export function Settings() {
                 class="page-header"
                 onPointerDown={beginWindowDrag}
               >
-                <div class="page-head" title="拖动此处移动窗口">
-                  <div class="page-eyebrow">{PAGE_META[tab()].eyebrow}</div>
-                  <h1>{PAGE_META[tab()].title}</h1>
-                  <p>{PAGE_META[tab()].desc}</p>
+                <div class="page-head" title={tr("拖动此处移动窗口", "Drag here to move the window")}>
+                  <div class="page-eyebrow">{pageMeta(tab()).eyebrow}</div>
+                  <h1>{pageMeta(tab()).title}</h1>
+                  <p>{pageMeta(tab()).desc}</p>
                 </div>
                 <div class="page-actions">
                   <div
@@ -423,14 +466,18 @@ export function Settings() {
                     <Show when={!dirty() && !statusError() && !saving()}>
                       <Icon name="check" size={14} />
                     </Show>
-                    <span>{saving() ? "正在保存…" : statusError() ? "需要检查" : status() || (dirty() ? "未保存" : "已保存")}</span>
+                    <span>{saving()
+                      ? tr("正在保存…", "Saving…")
+                      : statusError()
+                        ? tr("需要检查", "Needs attention")
+                        : status() || (dirty() ? tr("未保存", "Unsaved") : tr("已保存", "Saved"))}</span>
                   </div>
                   <button
                     class="primary"
                     disabled={!dirty() || saving()}
                     onClick={() => void save()}
                   >
-                    {saving() ? "正在保存…" : "保存更改"}
+                    {saving() ? tr("正在保存…", "Saving…") : tr("保存更改", "Save changes")}
                   </button>
                 </div>
               </header>
@@ -439,18 +486,37 @@ export function Settings() {
               </Show>
               <Show when={restartRequired()}>
                 <div class="restart-notice" role="status">
-                  <strong>渲染模式将在重启后生效</strong>
-                  <span>请从托盘退出 TYL 后重新打开。仅关闭设置窗口不会重启应用。</span>
+                  <strong>{tr("渲染模式将在重启后生效", "Rendering changes take effect after restart")}</strong>
+                  <span>{tr("请从托盘退出 TYL 后重新打开。仅关闭设置窗口不会重启应用。", "Quit TYL from the tray, then open it again. Closing Settings alone does not restart the app.")}</span>
                 </div>
               </Show>
               <div class="content-scroll" ref={contentScroll}>
                 <Show when={tab() === "general"}>
                   <section class="group">
-                    <div class="group-title">外观</div>
+                    <div class="group-title">{tr("外观", "Appearance")}</div>
+                    <div class="row">
+                      <div class="row-text">
+                        <label class="label" for="ui-language">{tr("界面语言", "Language")}</label>
+                        <div class="hint">{tr("默认跟随系统，也可固定为指定语言", "Follow the system by default, or choose a language")}</div>
+                      </div>
+                      <div class="select-wrap language-select-wrap">
+                        <select
+                          id="ui-language"
+                          class="input language-select"
+                          value={cur().language ?? "system"}
+                          onChange={(event) => patch({ language: event.currentTarget.value as LanguagePreference })}
+                        >
+                          <option value="system">{tr("跟随系统", "System default")}</option>
+                          <option value="zh-CN">简体中文</option>
+                          <option value="en-US">English</option>
+                        </select>
+                        <span class="select-chevron"><Icon name="down" size={15} /></span>
+                      </div>
+                    </div>
                     <div class="row theme-row">
                       <div class="row-text">
-                        <div class="label">界面主题</div>
-                        <div class="hint">弹窗与设置窗口使用相同的配色</div>
+                        <div class="label">{tr("界面主题", "Theme")}</div>
+                        <div class="hint">{tr("弹窗与设置窗口使用相同的配色", "Use the same theme for the popup and Settings")}</div>
                       </div>
                       <div class="theme-options">
                         <For
@@ -458,11 +524,11 @@ export function Settings() {
                             [
                               {
                                 id: "system",
-                                label: "跟随系统",
+                                label: tr("跟随系统", "System"),
                                 icon: "monitor",
                               },
-                              { id: "light", label: "浅色", icon: "sun" },
-                              { id: "dark", label: "深色", icon: "moon" },
+                              { id: "light", label: tr("浅色", "Light"), icon: "sun" },
+                              { id: "dark", label: tr("深色", "Dark"), icon: "moon" },
                             ] as const
                           }
                         >
@@ -484,11 +550,11 @@ export function Settings() {
                     </div>
                     <div class="row palette-row">
                       <div class="row-text">
-                        <div class="label">主题色</div>
-                        <div class="hint">用于强调色、选中状态与操作反馈</div>
+                        <div class="label">{tr("主题色", "Accent color")}</div>
+                        <div class="hint">{tr("用于强调色、选中状态与操作反馈", "Used for highlights, selections, and feedback")}</div>
                       </div>
-                      <div class="palette-options" aria-label="主题色">
-                        <For each={PALETTES}>
+                      <div class="palette-options" aria-label={tr("主题色", "Accent color")}>
+                        <For each={palettes()}>
                           {(option) => (
                             <button
                               classList={{
@@ -508,11 +574,11 @@ export function Settings() {
                     </div>
                   </section>
                   <section class="group">
-                    <div class="group-title">划词热键</div>
+                    <div class="group-title">{tr("划词热键", "Capture shortcut")}</div>
                     <div class="row">
                       <div class="row-text">
-                        <div class="label">触发组合键</div>
-                        <div class="hint">保存后重启应用生效</div>
+                        <div class="label">{tr("触发组合键", "Keyboard shortcut")}</div>
+                        <div class="hint">{tr("保存后重启应用生效", "Restart the app after saving")}</div>
                       </div>
                       <button
                         class={`hotkey-btn ${recording() ? "recording" : ""}`}
@@ -521,47 +587,47 @@ export function Settings() {
                         }
                       >
                         {recording()
-                          ? "按下组合键…（Esc 取消）"
-                          : formatHotkey(cur().hotkey) || "未设置"}
+                          ? tr("按下组合键…（Esc 取消）", "Press a key combination… (Esc to cancel)")
+                          : formatHotkey(cur().hotkey) || tr("未设置", "Not set")}
                       </button>
                     </div>
                     <p class="hint">
-                      建议 Alt/Shift 系组合，避免与常用软件冲突。
+                      {tr("建议 Alt/Shift 系组合，避免与常用软件冲突。", "Alt or Shift combinations are less likely to conflict with other apps.")}
                     </p>
                   </section>
 
                   <section class="group">
-                    <div class="group-title">取词</div>
+                    <div class="group-title">{tr("取词", "Text capture")}</div>
                     <div class="row">
                       <div class="row-text">
-                        <div class="label">显示选中原文</div>
-                        <div class="hint">默认关闭，为译文保留更多阅读空间</div>
+                        <div class="label">{tr("显示选中原文", "Show selected text")}</div>
+                        <div class="hint">{tr("默认关闭，为译文保留更多阅读空间", "Off by default to leave more room for translations")}</div>
                       </div>
                       <input
                         type="checkbox"
                         class="switch"
                         checked={cur().show_source}
-                        aria-label="显示选中原文"
+                        aria-label={tr("显示选中原文", "Show selected text")}
                         onChange={(e) =>
                           patch({ show_source: e.currentTarget.checked })
                         }
                       />
                     </div>
                     <p class="hint capture-hint">
-                      优先直接读取选区，必要时临时使用剪贴板并还原。终端仅直接读取，不模拟 Ctrl+C，避免中断正在运行的命令。
+                      {tr("优先直接读取选区，必要时临时使用剪贴板并还原。终端仅直接读取，不模拟 Ctrl+C，避免中断正在运行的命令。", "TYL reads the selection directly when possible. If needed, it temporarily uses and restores the clipboard. In terminals, it never simulates Ctrl+C, so running commands stay safe.")}
                     </p>
                   </section>
 
                   <section class="group">
-                    <div class="group-title">系统</div>
+                    <div class="group-title">{tr("系统", "System")}</div>
                     <div class="row">
                       <div class="row-text">
-                        <div class="label">GPU 硬件加速</div>
-                        <div class="hint" id="gpu-hint">默认关闭以减少显存占用；开启可利用 GPU 渲染。保存后重启生效。</div>
+                        <div class="label">{tr("GPU 硬件加速", "GPU acceleration")}</div>
+                        <div class="hint" id="gpu-hint">{tr("默认关闭以减少显存占用；开启可利用 GPU 渲染。保存后重启生效。", "Off by default to reduce video memory. Enable for GPU rendering; restart after saving.")}</div>
                         <Show when={gpuStatus()}>
                           <div class="hint gpu-current" id="gpu-current">
-                            本次启动：{gpuStatus()!.software ? "软件渲染" : "GPU 硬件加速"}
-                            {gpuStatus()!.external_override ? " · 外部启动参数禁用了 GPU" : ""}
+                            {tr("本次启动", "This session")}: {gpuStatus()!.software ? tr("软件渲染", "Software rendering") : tr("GPU 硬件加速", "GPU acceleration")}
+                            {gpuStatus()!.external_override ? tr(" · 外部启动参数禁用了 GPU", " · GPU disabled by launch arguments") : ""}
                           </div>
                         </Show>
                       </div>
@@ -569,21 +635,21 @@ export function Settings() {
                         type="checkbox"
                         class="switch"
                         checked={cur().gpu_acceleration ?? false}
-                        aria-label="GPU 硬件加速"
+                        aria-label={tr("GPU 硬件加速", "GPU acceleration")}
                         aria-describedby="gpu-hint gpu-current"
                         onChange={(e) => patch({ gpu_acceleration: e.currentTarget.checked })}
                       />
                     </div>
                     <div class="row">
                       <div class="row-text">
-                        <div class="label">开机自启</div>
-                        <div class="hint">登录 Windows 后自动驻留后台</div>
+                        <div class="label">{tr("开机自启", "Launch at startup")}</div>
+                        <div class="hint">{tr("登录 Windows 后自动驻留后台", "Run in the background after signing in to Windows")}</div>
                       </div>
                       <input
                         type="checkbox"
                         class="switch"
                         checked={autostart()}
-                        aria-label="开机自启"
+                        aria-label={tr("开机自启", "Launch at startup")}
                         onChange={(e) =>
                           void toggleAutostart(e.currentTarget.checked)
                         }
@@ -591,28 +657,28 @@ export function Settings() {
                     </div>
                     <div class="row">
                       <div class="row-text">
-                        <label class="label" for="log-level">日志等级</label>
-                        <div class="hint">默认记录运行状态和异常，保存后立即生效</div>
+                        <label class="label" for="log-level">{tr("日志等级", "Log level")}</label>
+                        <div class="hint">{tr("默认记录运行状态和异常，保存后立即生效", "Records runtime status and errors by default; applies immediately")}</div>
                       </div>
                       <div class="log-level-wrap">
                         <select id="log-level" class="input log-level" value={cur().log_level ?? "info"} onChange={(e) => patch({ log_level: e.currentTarget.value as SettingsData["log_level"] })}>
-                          <option value="off">关闭 · OFF</option>
-                          <option value="error">错误 · ERROR</option>
-                          <option value="warn">警告 · WARN</option>
-                          <option value="info">信息 · INFO</option>
-                          <option value="debug">调试 · DEBUG</option>
-                          <option value="trace">跟踪 · TRACE</option>
+                          <option value="off">{tr("关闭", "Off")} · OFF</option>
+                          <option value="error">{tr("错误", "Error")} · ERROR</option>
+                          <option value="warn">{tr("警告", "Warning")} · WARN</option>
+                          <option value="info">{tr("信息", "Info")} · INFO</option>
+                          <option value="debug">{tr("调试", "Debug")} · DEBUG</option>
+                          <option value="trace">{tr("跟踪", "Trace")} · TRACE</option>
                         </select>
                         <span class="log-level-chevron"><Icon name="down" size={15} /></span>
                       </div>
                     </div>
-                    <p class="hint">日志写入程序目录的 tyl.log；目录不可写时使用系统临时目录。调试/跟踪用于排查问题，不记录密钥或选中文本。</p>
+                    <p class="hint">{tr("日志写入程序目录的 tyl.log；目录不可写时使用系统临时目录。调试/跟踪用于排查问题，不记录密钥或选中文本。", "Logs are written to tyl.log beside the app, or to the system temporary folder if that location is read-only. Debug and Trace help diagnose issues; keys and selected text are never logged.")}</p>
                   </section>
                 </Show>
 
                 <Show when={tab() === "translate"}>
                   <section class="group display-group">
-                    <div class="group-title">结果呈现</div>
+                    <div class="group-title">{tr("结果呈现", "Result layout")}</div>
                     <div class="display-options">
                       <button
                         type="button"
@@ -632,8 +698,8 @@ export function Settings() {
                           <b />
                         </span>
                         <span class="mode-copy">
-                          <strong>标签切换</strong>
-                          <small>首个引擎立即翻译，其余按需请求</small>
+                          <strong>{tr("标签切换", "Tabs")}</strong>
+                          <small>{tr("首个引擎立即翻译，其余按需请求", "Translate with the first engine; load others on demand")}</small>
                         </span>
                         <span class="mode-check" aria-hidden="true">✓</span>
                       </button>
@@ -655,8 +721,8 @@ export function Settings() {
                           <i />
                         </span>
                         <span class="mode-copy">
-                          <strong>全部展开</strong>
-                          <small>并行请求全部引擎，纵向对照结果</small>
+                          <strong>{tr("全部展开", "Show all")}</strong>
+                          <small>{tr("并行请求全部引擎，纵向对照结果", "Run every engine in parallel and compare vertically")}</small>
                         </span>
                         <span class="mode-check" aria-hidden="true">✓</span>
                       </button>
@@ -664,12 +730,12 @@ export function Settings() {
                   </section>
 
                   <section class="group">
-                    <div class="group-title">翻译引擎</div>
+                    <div class="group-title">{tr("翻译引擎", "Translation engines")}</div>
                     <p class="hint">
                       {cur().result_display === "tabs"
-                        ? "排在第一位的引擎划词后立即翻译，其余引擎切换时按需请求。"
-                        : "划词后并行请求所有已启用引擎，并按以下顺序展示结果。"}
-                      使用箭头调整顺序。
+                        ? tr("排在第一位的引擎划词后立即翻译，其余引擎切换时按需请求。", "The first engine starts immediately; other engines load when selected.")
+                        : tr("划词后并行请求所有已启用引擎，并按以下顺序展示结果。", "All enabled engines run in parallel and appear in this order.")}
+                      {tr(" 使用箭头调整顺序。", " Use the arrows to change the order.")}
                     </p>
 
                     {/* 已启用（有序） */}
@@ -682,23 +748,23 @@ export function Settings() {
                             </span>
                             <div class="row-text">
                               <div class="label engine-label">
-                                {ENGINE_META[id]?.label ?? id}
+                                {engineMeta(id).label}
                                 <Show when={i() === 0}>
                                   <span class="preferred-badge">
                                     {cur().result_display === "tabs"
-                                      ? "首选引擎"
-                                      : "优先展示"}
+                                      ? tr("首选引擎", "Primary")
+                                      : tr("优先展示", "Shown first")}
                                   </span>
                                 </Show>
                               </div>
                               <div class="hint">
-                                {ENGINE_META[id]?.desc ?? ""}
+                                {engineMeta(id).desc}
                               </div>
                             </div>
                             <div class="engine-ops">
                               <button
                                 class="icon-btn"
-                                title="上移"
+                                title={tr("上移", "Move up")}
                                 disabled={i() === 0}
                                 onClick={() => moveEngine(i(), -1)}
                               >
@@ -706,7 +772,7 @@ export function Settings() {
                               </button>
                               <button
                                 class="icon-btn"
-                                title="下移"
+                                title={tr("下移", "Move down")}
                                 disabled={i() === cur().engines.length - 1}
                                 onClick={() => moveEngine(i(), 1)}
                               >
@@ -717,7 +783,7 @@ export function Settings() {
                                 class="switch"
                                 checked={true}
                                 disabled={cur().engines.length <= 1}
-                                title="关闭（至少保留一个引擎）"
+                                title={tr("关闭（至少保留一个引擎）", "Disable (keep at least one engine)")}
                                 onChange={() => toggleEngine(id, false)}
                               />
                             </div>
@@ -738,7 +804,7 @@ export function Settings() {
                             class="chip"
                             onClick={() => toggleEngine(id, true)}
                           >
-                            + {ENGINE_META[id]?.label ?? id}
+                            + {engineMeta(id).label}
                           </button>
                         )}
                       </For>
@@ -746,27 +812,27 @@ export function Settings() {
                   </section>
 
                   <section class="group dictionary-group">
-                    <div class="group-title">词典服务</div>
+                    <div class="group-title">{tr("词典服务", "Dictionary")}</div>
                     <div class="row">
                       <div class="row-text">
-                        <div class="label">单词词典卡片</div>
-                        <div class="hint">选中英文单词时显示音标、词性与释义</div>
+                        <div class="label">{tr("单词词典卡片", "Word dictionary card")}</div>
+                        <div class="hint">{tr("选中英文单词时显示音标、词性与释义", "Show pronunciation, part of speech, and definitions for English words")}</div>
                       </div>
                       <input
                         type="checkbox"
                         class="switch"
-                        aria-label="单词词典卡片"
+                        aria-label={tr("单词词典卡片", "Word dictionary card")}
                         checked={cur().dictionary.enabled}
                         onChange={(e) => patchDictionary({ enabled: e.currentTarget.checked })}
                       />
                     </div>
                     <div class="row dictionary-provider-row" classList={{ disabled: !cur().dictionary.enabled }}>
                       <div class="row-text">
-                        <label class="label" for="dictionary-provider">词典数据源</label>
+                        <label class="label" for="dictionary-provider">{tr("词典数据源", "Dictionary provider")}</label>
                         <div class="hint">
                           {cur().dictionary.provider === "auto"
-                            ? "自动按有道 → 金山 → 必应的顺序降级"
-                            : "固定使用所选词典，失败时不切换数据源"}
+                            ? tr("自动按有道 → 金山 → 必应的顺序降级", "Automatically try Youdao → Kingsoft → Bing")
+                            : tr("固定使用所选词典，失败时不切换数据源", "Use only the selected dictionary with no fallback")}
                         </div>
                       </div>
                       <div class="select-wrap dictionary-select-wrap">
@@ -777,10 +843,10 @@ export function Settings() {
                           disabled={!cur().dictionary.enabled}
                           onChange={(e) => patchDictionary({ provider: e.currentTarget.value as DictionarySettings["provider"] })}
                         >
-                          <option value="auto">自动推荐</option>
-                          <option value="youdao">有道词典</option>
-                          <option value="iciba">金山词典</option>
-                          <option value="bing">必应词典</option>
+                          <option value="auto">{tr("自动推荐", "Automatic")}</option>
+                          <option value="youdao">{tr("有道词典", "Youdao Dictionary")}</option>
+                          <option value="iciba">{tr("金山词典", "Kingsoft Dictionary")}</option>
+                          <option value="bing">{tr("必应词典", "Bing Dictionary")}</option>
                         </select>
                         <span class="select-chevron"><Icon name="down" size={15} /></span>
                       </div>
@@ -790,12 +856,12 @@ export function Settings() {
 
                 <Show when={tab() === "network"}>
                   <section class="group">
-                    <div class="group-title">网络代理</div>
+                    <div class="group-title">{tr("网络代理", "Network proxy")}</div>
                     <div class="seg">
                       {[
-                        ["off", "直连"],
-                        ["system", "跟随系统"],
-                        ["manual", "手动"],
+                        ["off", tr("直连", "Direct")],
+                        ["system", tr("跟随系统", "System")],
+                        ["manual", tr("手动", "Manual")],
                       ].map(([v, label]) => (
                         <button
                           classList={{ active: cur().proxy.mode === v }}
@@ -811,7 +877,7 @@ export function Settings() {
                       <input
                         class="input"
                         type="text"
-                        placeholder="http://127.0.0.1:7890 或 socks5://…"
+                        placeholder={tr("http://127.0.0.1:7890 或 socks5://…", "http://127.0.0.1:7890 or socks5://…")}
                         value={cur().proxy.url}
                         onInput={(e) =>
                           patch({
@@ -822,12 +888,11 @@ export function Settings() {
                           })
                         }
                       />
-                      <p class="hint">翻译与词典请求全部经此代理。</p>
+                      <p class="hint">{tr("翻译与词典请求全部经此代理。", "All translation and dictionary requests use this proxy.")}</p>
                     </Show>
                     <Show when={cur().proxy.mode === "system"}>
                       <p class="hint">
-                        自动使用 Windows 系统代理（Internet
-                        选项），随系统开关联动。
+                        {tr("自动使用 Windows 系统代理（Internet 选项），随系统开关联动。", "Automatically use the Windows system proxy (Internet Options) and follow its current state.")}
                       </p>
                     </Show>
                   </section>
@@ -835,7 +900,7 @@ export function Settings() {
 
                 <Show when={tab() === "llm"}>
                   <section class="group">
-                    <div class="group-title">AI 模型（OpenAI 兼容）</div>
+                    <div class="group-title">{tr("AI 模型（OpenAI 兼容）", "AI Model (OpenAI compatible)")}</div>
                     <label class="field">
                       <span class="field-label">Base URL</span>
                       <input
@@ -854,7 +919,7 @@ export function Settings() {
                       />
                     </label>
                     <p class="hint">
-                      支持供应商提供的 Base URL 或完整 /chat/completions 地址。
+                      {tr("支持供应商提供的 Base URL 或完整 /chat/completions 地址。", "Supports a provider Base URL or a complete /chat/completions endpoint.")}
                     </p>
                     <div class="field">
                       <label class="field-label" for="llm-api-key">API Key</label>
@@ -877,8 +942,8 @@ export function Settings() {
                         }
                       />
                         <button type="button" class="secret-toggle"
-                          aria-label={showApiKey() ? "隐藏 API Key" : "显示 API Key"}
-                          title={showApiKey() ? "隐藏 API Key" : "显示 API Key"}
+                          aria-label={showApiKey() ? tr("隐藏 API Key", "Hide API Key") : tr("显示 API Key", "Show API Key")}
+                          title={showApiKey() ? tr("隐藏 API Key", "Hide API Key") : tr("显示 API Key", "Show API Key")}
                           aria-pressed={showApiKey()}
                           onClick={() => setShowApiKey(!showApiKey())}>
                           <Icon name={showApiKey() ? "eyeOff" : "eye"} size={18} />
@@ -886,7 +951,7 @@ export function Settings() {
                       </div>
                     </div>
                     <label class="field">
-                      <span class="field-label">模型</span>
+                      <span class="field-label">{tr("模型", "Model")}</span>
                       <input
                         class="input"
                         type="text"
@@ -900,14 +965,13 @@ export function Settings() {
                       />
                     </label>
                     <p class="hint">
-                      请在翻译页启用 AI 引擎；标签模式下，首选
-                      AI 失败后会尝试其他启用的引擎。
+                      {tr("请在翻译页启用 AI 引擎；标签模式下，首选 AI 失败后会尝试其他启用的引擎。", "Enable the AI engine on the Translation page. In tab mode, TYL tries another enabled engine if the primary AI engine fails.")}
                     </p>
                     <div class="connection-test">
                       <button class="test-connection" disabled={testingLlm() || !cur().llm.api_key.trim() || !cur().llm.model.trim()} onClick={() => void testLlm()}>
-                        {testingLlm() ? "正在测试…" : "测试连接"}
+                        {testingLlm() ? tr("正在测试…", "Testing…") : tr("测试连接", "Test connection")}
                       </button>
-                      <span class="hint">使用当前填写的配置发送固定短句，不保存设置；会消耗少量 API 额度。</span>
+                      <span class="hint">{tr("使用当前填写的配置发送固定短句，不保存设置；会消耗少量 API 额度。", "Sends a fixed short sentence using the current fields without saving. This uses a small amount of API credit.")}</span>
                     </div>
                     <Show when={llmTest()}><p class="connection-result" classList={{ error: llmTest()!.error }} role="status">{llmTest()!.text}</p></Show>
                   </section>

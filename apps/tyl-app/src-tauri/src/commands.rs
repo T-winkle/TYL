@@ -259,7 +259,7 @@ pub async fn replace_selection(
 
 /// Tests the entered AI fields without saving them or sending selected text.
 #[tauri::command]
-pub async fn test_llm(config: crate::settings::LlmSettings) -> Result<String, String> {
+pub async fn test_llm(config: crate::settings::LlmSettings) -> Result<u64, String> {
     let config = crate::translate::llm::LlmConfig {
         base_url: config.base_url,
         api_key: config.api_key,
@@ -270,10 +270,7 @@ pub async fn test_llm(config: crate::settings::LlmSettings) -> Result<String, St
         crate::translate::llm::translate_stream(&config, "Good morning.", "zh-CN", &mut |_| {})
             .await;
     match result {
-        Ok(_) => Ok(format!(
-            "连接成功，已收到译文（{:.1} 秒）",
-            started.elapsed().as_secs_f64()
-        )),
+        Ok(_) => Ok(started.elapsed().as_millis() as u64),
         Err(error) => {
             crate::logger::warn(&format!("[llm/test] {error}"));
             Err(error)
@@ -287,7 +284,7 @@ pub fn get_settings() -> crate::settings::Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(settings: crate::settings::Settings) -> Result<(), String> {
+pub fn save_settings(app: AppHandle, settings: crate::settings::Settings) -> Result<(), String> {
     // 手动代理格式前置校验：错了当场报，不让用户带着坏代理静默直连。
     if settings.proxy.mode == "manual" {
         let url = settings.proxy.url.trim();
@@ -302,6 +299,7 @@ pub fn save_settings(settings: crate::settings::Settings) -> Result<(), String> 
         }
     }
     crate::settings::save(settings)?;
+    crate::refresh_tray_i18n(&app);
     // 代理变更 → 重建 HTTP client（下次请求生效新代理）
     crate::translate::reset_client();
     Ok(())

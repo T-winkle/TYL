@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
+    /// UI language: "system" | "zh-CN" | "en-US".
+    pub language: String,
     /// 全局热键（解析失败回退默认）。
     pub hotkey: String,
     /// 启用的引擎（有序，第一个 = 主引擎/默认展示；弹窗 tab 顺序同此）。
@@ -107,6 +109,7 @@ fn default_dictionary_provider() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: crate::i18n::SYSTEM.into(),
             hotkey: "alt+t".into(),
             engines: vec!["bing".into(), "youdao".into(), "transmart".into()],
             result_display: RESULT_DISPLAY_TABS.into(),
@@ -168,6 +171,7 @@ pub const RESULT_DISPLAY_STACKED: &str = "stacked";
 pub const COLOR_SCHEMES: [&str; 3] = ["jade", "indigo", "plum"];
 pub const DICTIONARY_AUTO: &str = "auto";
 pub const DICTIONARY_PROVIDERS: [&str; 4] = [DICTIONARY_AUTO, "youdao", "iciba", "bing"];
+pub const LANGUAGES: [&str; 3] = [crate::i18n::SYSTEM, crate::i18n::ZH_CN, crate::i18n::EN_US];
 
 /// 加载（缺失/损坏 → 默认值并写回）。启动时调用。
 pub fn load() -> Settings {
@@ -254,6 +258,9 @@ pub fn save(mut s: Settings) -> Result<(), String> {
 }
 
 fn normalize_appearance(s: &mut Settings) {
+    if !LANGUAGES.contains(&s.language.as_str()) {
+        s.language = crate::i18n::SYSTEM.into();
+    }
     if !matches!(s.theme.as_str(), "system" | "light" | "dark") {
         s.theme = "system".into();
     }
@@ -396,10 +403,21 @@ mod tests {
     fn old_settings_default_to_tab_results() {
         let settings: Settings = serde_json::from_str(r#"{"hotkey":"alt+e"}"#).unwrap();
         assert_eq!(settings.result_display, RESULT_DISPLAY_TABS);
+        assert_eq!(settings.language, crate::i18n::SYSTEM);
         assert_eq!(settings.color_scheme, "indigo");
         assert!(!settings.show_source);
         assert!(!settings.gpu_acceleration);
         assert_eq!(settings.log_level, crate::logger::Level::Info);
+    }
+
+    #[test]
+    fn unknown_language_is_normalized_to_system() {
+        let mut settings = Settings {
+            language: "fr-FR".into(),
+            ..Settings::default()
+        };
+        normalize_appearance(&mut settings);
+        assert_eq!(settings.language, crate::i18n::SYSTEM);
     }
 
     #[test]

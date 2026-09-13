@@ -10,9 +10,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Icon } from "../shared/Icon";
+import { Logo } from "../shared/Logo";
 import { applyTheme, type ColorScheme, type Theme } from "../shared/theme";
 import { installContextMenuGuard } from "../shared/contextMenu";
-import logo from "../shared/logo.svg";
+import {
+  applyLanguage,
+  localizedError,
+  tr,
+  type LanguagePreference,
+} from "../shared/i18n";
 
 interface CapturedPayload {
   request_id: number;
@@ -25,6 +31,7 @@ interface CapturedPayload {
   grow_upward: boolean;
   theme: Theme;
   color_scheme: ColorScheme;
+  language: LanguagePreference;
   show_source: boolean;
   is_word: boolean;
   dictionary?: boolean;
@@ -51,16 +58,18 @@ interface EngineState {
   text: string;
   error?: string;
 }
-const LABELS: Record<string, string> = {
-  bing: "必应",
-  youdao: "有道",
-  transmart: "腾讯",
-  yandex: "Yandex",
-  iciba: "金山",
-  mymemory: "MyMemory",
-  google: "Google",
-  llm: "AI",
-};
+function engineLabel(id: string) {
+  return {
+    bing: tr("必应", "Bing"),
+    youdao: tr("有道", "Youdao"),
+    transmart: tr("腾讯", "Tencent"),
+    yandex: "Yandex",
+    iciba: tr("金山", "Kingsoft"),
+    mymemory: "MyMemory",
+    google: "Google",
+    llm: "AI",
+  }[id] ?? id;
+}
 
 export function Popup() {
   const [captured, setCaptured] = createSignal<CapturedPayload | null>(null);
@@ -114,7 +123,7 @@ export function Popup() {
     engineIds()
       .map((id) => {
         const text = engines().find((e) => e.service === id)?.text;
-        return text ? `${LABELS[id] ?? id}\n${text}` : "";
+        return text ? `${engineLabel(id)}\n${text}` : "";
       })
       .filter(Boolean)
       .join("\n\n");
@@ -144,9 +153,10 @@ export function Popup() {
     const id = captured()?.request_id;
     try {
       await invoke("copy_translation", { text });
-      if (id === captured()?.request_id) feedback("已复制");
+      if (id === captured()?.request_id) feedback(tr("已复制", "Copied"));
     } catch (e) {
-      if (id === captured()?.request_id) feedback(String(e), true);
+      if (id === captured()?.request_id)
+        feedback(localizedError(e, "Could not copy the translation"), true);
     }
   };
   const replace = async (text: string) => {
@@ -168,7 +178,7 @@ export function Popup() {
         // The backend refocuses it on failure; restore the UI so the reason is visible.
         setVisible(true);
         setEntered(true);
-        feedback(String(e), true);
+        feedback(localizedError(e, "Could not replace the original selection"), true);
       }
     } finally {
       setBusy(false);
@@ -188,7 +198,7 @@ export function Popup() {
     audioTimer = window.setTimeout(() => {
       if (token === audioToken) {
         stopAudio();
-        feedback("发音加载超时，请重试", true);
+        feedback(tr("发音加载超时，请重试", "Pronunciation timed out. Try again."), true);
       }
     }, 12000);
     try {
@@ -213,7 +223,7 @@ export function Popup() {
       audio.onerror = () => {
         if (token === audioToken) {
           stopAudio();
-          feedback("发音播放失败，请重试", true);
+          feedback(tr("发音播放失败，请重试", "Could not play pronunciation. Try again."), true);
         }
       };
       await audio.play();
@@ -229,7 +239,7 @@ export function Popup() {
     } catch (e) {
       if (token === audioToken) {
         stopAudio();
-        feedback(String(e), true);
+        feedback(localizedError(e, "Could not load this pronunciation"), true);
       }
     }
   };
@@ -238,7 +248,7 @@ export function Popup() {
       try {
         setDict(JSON.parse(p.text));
       } catch {
-        feedback("词典暂不可用，正在加载引擎译文", true);
+        feedback(tr("词典暂不可用，正在加载引擎译文", "Dictionary unavailable. Loading an engine translation."), true);
         showWordTranslations();
       }
       setDictPending(false);
@@ -302,6 +312,8 @@ export function Popup() {
     window.cancelAnimationFrame(enterFrame);
     lastHeight = 0;
     setCaptured(payload);
+    applyLanguage(payload.language ?? "system");
+    document.title = tr("TYL 划词翻译", "TYL Selection Translator");
     applyTheme(payload.theme ?? "system", payload.color_scheme ?? "indigo");
     setEngines([]);
     setActive(payload.engines?.[0] ?? "");
@@ -432,7 +444,7 @@ export function Popup() {
       cancelDrag();
       void getCurrentWindow()
         .startDragging()
-        .catch(() => feedback("暂时无法移动窗口，请重试", true));
+        .catch(() => feedback(tr("暂时无法移动窗口，请重试", "Could not move the window. Try again."), true));
     };
     window.addEventListener("pointermove", moveDrag);
     window.addEventListener("pointerup", cancelDrag);
@@ -496,29 +508,31 @@ export function Popup() {
   return (
     <Show when={visible() && captured()}>
       <div class="popup" classList={{ entered: entered() }} ref={popupEl}>
-        <header class="bar" onPointerDown={beginDrag} title="拖动此处移动窗口">
+        <header class="bar" onPointerDown={beginDrag} title={tr("拖动此处移动窗口", "Drag here to move the window")}>
           <span class="brand" title={captureDescription(captured()!)}>
-            <img src={logo} alt="" draggable={false} />
+            <Logo />
             TYL
             <span class="brand-label">
-              {dictionaryView() ? "词典" : "划词翻译"}
+              {dictionaryView() ? tr("词典", "Dictionary") : tr("划词翻译", "Selection Translator")}
             </span>
           </span>
           <span class="capture-badge" title={captureDescription(captured()!)}>
             {captured()!.source.kind === "uia"
-              ? "直接取词"
+              ? tr("直接取词", "Direct capture")
               : captured()!.source.kind === "clipboard"
-                ? "剪贴板取词"
-                : "手动输入"}
+                ? tr("剪贴板取词", "Clipboard capture")
+                : tr("手动输入", "Manual input")}
           </span>
           <span class="language-label">
-            {isChinese(captured()!.text) ? "中文 → 英语" : "英语 → 中文"}
+            {isChinese(captured()!.text)
+              ? tr("中文 → 英语", "Chinese → English")
+              : tr("英语 → 中文", "English → Chinese")}
           </span>
           <button
             class="icon-button close"
             onClick={() => void hide()}
-            title="关闭 · Esc"
-            aria-label="关闭"
+            title={tr("关闭 · Esc", "Close · Esc")}
+            aria-label={tr("关闭", "Close")}
           >
             <Icon name="close" size={15} />
           </button>
@@ -538,10 +552,10 @@ export function Popup() {
                 onClick={() => setSourceExpanded((v) => !v)}
               >
                 <span>
-                  原文 <small>{captured()!.text.length} 字符</small>
+                  {tr("原文", "Source")} <small>{captured()!.text.length} {tr("字符", "characters")}</small>
                 </span>
                 <span>
-                  {sourceExpanded() ? "收起" : "展开"}
+                  {sourceExpanded() ? tr("收起", "Collapse") : tr("展开", "Expand")}
                   <Icon name="chevron" size={13} />
                 </span>
               </button>
@@ -556,14 +570,14 @@ export function Popup() {
         </Show>
         <Show when={dict() || dictPending()}>
           <div class="word-bar">
-            <div class="word-nav" role="tablist" aria-label="单词查询结果">
+            <div class="word-nav" role="tablist" aria-label={tr("单词查询结果", "Word lookup results")}>
               <button
                 role="tab"
                 aria-selected={dictionaryView()}
                 classList={{ active: dictionaryView() }}
                 onClick={() => setWordTranslations(false)}
               >
-                词典释义
+                {tr("词典释义", "Dictionary")}
               </button>
               <button
                 role="tab"
@@ -571,7 +585,7 @@ export function Popup() {
                 classList={{ active: !dictionaryView() }}
                 onClick={showWordTranslations}
               >
-                引擎译文
+                {tr("引擎译文", "Translations")}
               </button>
             </div>
             <Show when={!dictionaryView() && !stacked()}>
@@ -612,7 +626,7 @@ export function Popup() {
                                   class="engine-status"
                                   data-status={state()?.status ?? "loading"}
                                 />
-                                {LABELS[id] ?? id}
+                                {engineLabel(id)}
                               </span>
                               <span class="result-state">
                                 {statusLabel(state()?.status)}
@@ -621,9 +635,9 @@ export function Popup() {
                                 class="icon-button collapse-button"
                                 classList={{ collapsed: collapsed().has(id) }}
                                 title={
-                                  collapsed().has(id) ? "展开结果" : "折叠结果"
+                                  collapsed().has(id) ? tr("展开结果", "Expand result") : tr("折叠结果", "Collapse result")
                                 }
-                                aria-label={`${collapsed().has(id) ? "展开" : "折叠"}${LABELS[id] ?? id}译文`}
+                                aria-label={`${collapsed().has(id) ? tr("展开", "Expand") : tr("折叠", "Collapse")} ${engineLabel(id)} ${tr("译文", "translation")}`}
                                 aria-expanded={!collapsed().has(id)}
                                 onClick={() => toggleResult(id)}
                               >
@@ -631,8 +645,8 @@ export function Popup() {
                               </button>
                               <button
                                 class="icon-button"
-                                title={`复制${LABELS[id]}译文`}
-                                aria-label={`复制${LABELS[id]}译文`}
+                                title={`${tr("复制", "Copy")} ${engineLabel(id)} ${tr("译文", "translation")}`}
+                                aria-label={`${tr("复制", "Copy")} ${engineLabel(id)} ${tr("译文", "translation")}`}
                                 disabled={!state()?.text}
                                 onClick={() => void copy(state()!.text)}
                               >
@@ -643,11 +657,11 @@ export function Popup() {
                                 title={
                                   captured()?.can_replace
                                     ? captured()?.replace_requires_verification
-                                      ? "尝试替换原选区（先校验选中文本）"
-                                      : "用此译文替换原选区（不影响剪贴板历史）"
-                                    : "原选区只读或无法确认可编辑，请复制译文"
+                                      ? tr("尝试替换原选区（先校验选中文本）", "Replace the original selection after verification")
+                                      : tr("用此译文替换原选区（不影响剪贴板历史）", "Replace the original selection without affecting clipboard history")
+                                    : tr("原选区只读或无法确认可编辑，请复制译文", "The original selection is read-only or cannot be verified; copy the translation instead")
                                 }
-                                aria-label={`用${LABELS[id]}译文替换原文`}
+                                aria-label={`${tr("用", "Replace with")} ${engineLabel(id)} ${tr("译文替换原文", "translation")}`}
                                 disabled={
                                   !captured()?.can_replace ||
                                   state()?.status !== "done" ||
@@ -674,7 +688,7 @@ export function Popup() {
                   <div
                     class="engine-tabs"
                     role="tablist"
-                    aria-label="翻译引擎"
+                    aria-label={tr("翻译引擎", "Translation engines")}
                     ref={engineTabsEl}
                     onWheel={scrollEngineTabs}
                   >
@@ -694,7 +708,7 @@ export function Popup() {
                               "idle"
                             }
                           />
-                          {LABELS[id] ?? id}
+                          {engineLabel(id)}
                         </button>
                       )}
                     </For>
@@ -726,10 +740,10 @@ export function Popup() {
         >
           <section class="dict">
             <Show when={!dictPending()} fallback={
-              <div class="dict-loading" role="status" aria-label="正在查询词典">
+              <div class="dict-loading" role="status" aria-label={tr("正在查询词典", "Looking up dictionary")}>
                 <h1 class="dict-word">{captured()!.text}</h1>
                 <div class="loading-block"><i /><i /><i /></div>
-                <p class="dict-loading-label">正在查询词典…</p>
+                <p class="dict-loading-label">{tr("正在查询词典…", "Looking up dictionary…")}</p>
               </div>
             }>
             <h1 class="dict-word">{dict()!.word}</h1>
@@ -747,13 +761,13 @@ export function Popup() {
                     }
                     aria-pressed={speaking() === accent}
                     onClick={() => void pronounce(accent)}
-                    title={accent === "uk" ? "播放英式发音" : "播放美式发音"}
+                    title={accent === "uk" ? tr("播放英式发音", "Play British pronunciation") : tr("播放美式发音", "Play American pronunciation")}
                     aria-label={
-                      accent === "uk" ? "播放英式发音" : "播放美式发音"
+                      accent === "uk" ? tr("播放英式发音", "Play British pronunciation") : tr("播放美式发音", "Play American pronunciation")
                     }
                   >
                     <span class="accent-label">
-                      {accent === "uk" ? "英" : "美"}
+                      {accent === "uk" ? tr("英", "UK") : tr("美", "US")}
                     </span>
                     <span class="phonetic">
                       {(
@@ -762,7 +776,7 @@ export function Popup() {
                           : dict()!.phonetic_us
                       )
                         ? `/${accent === "uk" ? dict()!.phonetic_uk : dict()!.phonetic_us}/`
-                        : "点击发音"}
+                        : tr("点击发音", "Play")}
                     </span>
                     <span class="sound-icon">
                       <Icon name="sound" size={14} />
@@ -782,7 +796,7 @@ export function Popup() {
               <For each={dict()!.senses}>
                 {(sense) => (
                   <div class="dict-sense">
-                    <span class="dict-pos">{sense.pos || "释义"}</span>
+                    <span class="dict-pos">{sense.pos || tr("释义", "Definition")}</span>
                     <span>{sense.definitions.join("；")}</span>
                   </div>
                 )}
@@ -814,11 +828,11 @@ function ResultActions(props: {
   onReplace: (text: string) => Promise<void>;
 }) {
   return (
-    <div class="result-actions" aria-label="结果操作">
+    <div class="result-actions" aria-label={tr("结果操作", "Result actions")}>
       <button
         class="icon-button"
-        title="复制当前结果 · Ctrl+C"
-        aria-label="复制当前结果"
+        title={tr("复制当前结果 · Ctrl+C", "Copy current result · Ctrl+C")}
+        aria-label={tr("复制当前结果", "Copy current result")}
         disabled={!props.text}
         onClick={() => void props.onCopy(props.text)}
       >
@@ -829,11 +843,11 @@ function ResultActions(props: {
         title={
           props.canReplace
             ? props.requiresVerification
-              ? "尝试替换原选区（先校验选中文本）"
-              : "替换原选区（不影响剪贴板历史）"
-            : "原选区只读或无法确认可编辑"
+              ? tr("尝试替换原选区（先校验选中文本）", "Replace the original selection after verification")
+              : tr("替换原选区（不影响剪贴板历史）", "Replace the original selection without affecting clipboard history")
+            : tr("原选区只读或无法确认可编辑", "The original selection is read-only or cannot be verified")
         }
-        aria-label="用当前结果替换原文"
+        aria-label={tr("用当前结果替换原文", "Replace source with current result")}
         disabled={!props.text || !props.canReplace || props.busy}
         onClick={() => void props.onReplace(props.text)}
       >
@@ -850,7 +864,7 @@ function EngineContent(props: { state?: EngineState }) {
         <Show
           when={props.state?.status === "error"}
           fallback={
-            <div class="loading-block" aria-label="正在翻译">
+            <div class="loading-block" aria-label={tr("正在翻译", "Translating")}>
               <i />
               <i />
               <i />
@@ -859,7 +873,7 @@ function EngineContent(props: { state?: EngineState }) {
         >
           <div class="error-row">
             <span>{friendlyError(props.state?.error)}</span>
-            <small>可切换其他引擎，或检查网络与配置。</small>
+            <small>{tr("可切换其他引擎，或检查网络与配置。", "Try another engine, or check your network and settings.")}</small>
           </div>
         </Show>
       }
@@ -869,7 +883,7 @@ function EngineContent(props: { state?: EngineState }) {
         <span class="caret" />
       </Show>
       <Show when={props.state?.status === "error"}>
-        <div class="partial-error">连接中断，已保留收到的内容</div>
+        <div class="partial-error">{tr("连接中断，已保留收到的内容", "Connection interrupted; received content was kept")}</div>
       </Show>
     </Show>
   );
@@ -879,26 +893,32 @@ function isChinese(text: string) {
 }
 function statusLabel(status?: EngineState["status"]) {
   return status === "done"
-    ? "翻译完成"
+    ? tr("翻译完成", "Complete")
     : status === "error"
-      ? "暂不可用"
+      ? tr("暂不可用", "Unavailable")
       : status === "streaming"
-        ? "正在生成"
-        : "正在翻译";
+        ? tr("正在生成", "Generating")
+        : tr("正在翻译", "Translating");
 }
 function friendlyError(error = "") {
-  if (error.startsWith("AI ")) return error;
-  if (/API Key|API key/.test(error)) return "请先配置 AI 密钥";
-  if (/network|dns|connect|timeout/.test(error)) return "暂时无法连接翻译服务";
-  return error === "empty" ? "此引擎未返回译文" : "此引擎暂不可用";
+  if (error.startsWith("AI ")) {
+    return /API Key|API key/.test(error)
+      ? tr("请先配置 AI 密钥", "Configure an AI API key first")
+      : localizedError(error, "AI translation failed");
+  }
+  if (/API Key|API key/.test(error)) return tr("请先配置 AI 密钥", "Configure an AI API key first");
+  if (/network|dns|connect|timeout/i.test(error)) return tr("暂时无法连接翻译服务", "Could not connect to the translation service");
+  return error === "empty"
+    ? tr("此引擎未返回译文", "This engine returned no translation")
+    : tr("此引擎暂不可用", "This engine is temporarily unavailable");
 }
 function captureDescription(p: CapturedPayload) {
   const method =
     p.source.kind === "uia"
-      ? "直接读取选中文本，未使用剪贴板"
+      ? tr("直接读取选中文本，未使用剪贴板", "Selected text was read directly without using the clipboard")
       : p.source.restored
-        ? "已读取选区并恢复原剪贴板"
-        : "通过剪贴板读取选中文本";
+        ? tr("已读取选区并恢复原剪贴板", "The selection was read and the original clipboard was restored")
+        : tr("通过剪贴板读取选中文本", "Selected text was read through the clipboard");
   return `${method}${p.target_exe ? ` · ${p.target_exe}` : ""}`;
 }
 function measureNaturalHeight(popup?: HTMLDivElement): number {
