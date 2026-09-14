@@ -18,6 +18,8 @@ pub struct Settings {
     pub engines: Vec<String>,
     /// 翻译结果展示："tabs"（按需切换）| "stacked"（全部展开并行请求）。
     pub result_display: String,
+    /// Source detection and target routing preferences.
+    pub language_routing: LanguageRoutingSettings,
     /// "system" | "light" | "dark".
     pub theme: String,
     /// Brand palette: "jade" | "indigo" | "plum".
@@ -51,6 +53,21 @@ pub struct ProxySettings {
     pub mode: String,
     /// 手动模式：http://host:port 或 socks5://host:port
     pub url: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct LanguageRoutingSettings {
+    /// "smart" | "fixed_target" | "fixed_pair".
+    pub mode: String,
+    /// Smart mode: text in this language is translated to `secondary`.
+    pub primary: String,
+    /// Smart mode counterpart; all other languages are translated to `primary`.
+    pub secondary: String,
+    /// Fixed-pair source language.
+    pub source: String,
+    /// Fixed-target and fixed-pair target language.
+    pub target: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -113,6 +130,7 @@ impl Default for Settings {
             hotkey: "alt+t".into(),
             engines: vec!["bing".into(), "youdao".into(), "transmart".into()],
             result_display: RESULT_DISPLAY_TABS.into(),
+            language_routing: LanguageRoutingSettings::default(),
             theme: "system".into(),
             color_scheme: "indigo".into(),
             show_source: false,
@@ -145,6 +163,18 @@ impl Default for ProxySettings {
     }
 }
 
+impl Default for LanguageRoutingSettings {
+    fn default() -> Self {
+        Self {
+            mode: LANGUAGE_MODE_SMART.into(),
+            primary: "zh-CN".into(),
+            secondary: "en".into(),
+            source: "en".into(),
+            target: "zh-CN".into(),
+        }
+    }
+}
+
 static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
 /// 配置文件路径：exe 同目录 settings.json（便携式，跟 exe 走）。
@@ -168,6 +198,12 @@ pub const ENGINE_IDS: [&str; 8] = [
 ];
 pub const RESULT_DISPLAY_TABS: &str = "tabs";
 pub const RESULT_DISPLAY_STACKED: &str = "stacked";
+pub const LANGUAGE_MODE_SMART: &str = "smart";
+pub const LANGUAGE_MODE_FIXED_TARGET: &str = "fixed_target";
+pub const LANGUAGE_MODE_FIXED_PAIR: &str = "fixed_pair";
+pub const LANGUAGE_CODES: [&str; 10] = [
+    "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "ru", "pt",
+];
 pub const COLOR_SCHEMES: [&str; 3] = ["jade", "indigo", "plum"];
 pub const DICTIONARY_AUTO: &str = "auto";
 pub const DICTIONARY_PROVIDERS: [&str; 4] = [DICTIONARY_AUTO, "youdao", "iciba", "bing"];
@@ -215,6 +251,7 @@ pub fn load() -> Settings {
         s.engines = Settings::default().engines;
     }
     normalize_dictionary(&mut s);
+    normalize_language_routing(&mut s);
     if !matches!(
         s.result_display.as_str(),
         RESULT_DISPLAY_TABS | RESULT_DISPLAY_STACKED
@@ -235,6 +272,7 @@ pub fn current() -> Settings {
 pub fn save(mut s: Settings) -> Result<(), String> {
     normalize_appearance(&mut s);
     normalize_dictionary(&mut s);
+    normalize_language_routing(&mut s);
     s.engines.retain(|e| ENGINE_IDS.contains(&e.as_str()));
     s.engines.dedup();
     if s.engines.is_empty() {
@@ -272,6 +310,45 @@ fn normalize_appearance(s: &mut Settings) {
 fn normalize_dictionary(s: &mut Settings) {
     if !DICTIONARY_PROVIDERS.contains(&s.dictionary.provider.as_str()) {
         s.dictionary.provider = DICTIONARY_AUTO.into();
+    }
+}
+
+fn normalize_language_routing(s: &mut Settings) {
+    let routing = &mut s.language_routing;
+    if !matches!(
+        routing.mode.as_str(),
+        LANGUAGE_MODE_SMART | LANGUAGE_MODE_FIXED_TARGET | LANGUAGE_MODE_FIXED_PAIR
+    ) {
+        routing.mode = LANGUAGE_MODE_SMART.into();
+    }
+    let defaults = LanguageRoutingSettings::default();
+    if !LANGUAGE_CODES.contains(&routing.primary.as_str()) {
+        routing.primary = defaults.primary;
+    }
+    if !LANGUAGE_CODES.contains(&routing.secondary.as_str()) {
+        routing.secondary = defaults.secondary;
+    }
+    if !LANGUAGE_CODES.contains(&routing.source.as_str()) {
+        routing.source = defaults.source;
+    }
+    if !LANGUAGE_CODES.contains(&routing.target.as_str()) {
+        routing.target = defaults.target;
+    }
+    if routing.primary == routing.secondary {
+        routing.secondary = if routing.primary == "en" {
+            "zh-CN"
+        } else {
+            "en"
+        }
+        .into();
+    }
+    if routing.source == routing.target {
+        routing.source = if routing.target == "en" {
+            "zh-CN"
+        } else {
+            "en"
+        }
+        .into();
     }
 }
 
@@ -418,6 +495,26 @@ mod tests {
         };
         normalize_appearance(&mut settings);
         assert_eq!(settings.language, crate::i18n::SYSTEM);
+    }
+
+    #[test]
+    fn language_routing_defaults_and_normalizes_invalid_pairs() {
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"alt+t"}"#).unwrap();
+        assert_eq!(old.language_routing, LanguageRoutingSettings::default());
+
+        let mut settings = Settings::default();
+        settings.language_routing.mode = "unknown".into();
+        settings.language_routing.primary = "en".into();
+        settings.language_routing.secondary = "en".into();
+        settings.language_routing.source = "ja".into();
+        settings.language_routing.target = "ja".into();
+        normalize_language_routing(&mut settings);
+        assert_eq!(settings.language_routing.mode, LANGUAGE_MODE_SMART);
+        assert_eq!(settings.language_routing.secondary, "zh-CN");
+        assert_ne!(
+            settings.language_routing.source,
+            settings.language_routing.target
+        );
     }
 
     #[test]

@@ -13,14 +13,35 @@ pub fn hide_popup(app: AppHandle) {
 /// 懒加载单引擎翻译（弹窗切 tab 时调用）。结果走 tyl://translate 事件
 /// 回推（service=engine），前端按 service 归位。
 #[tauri::command(rename_all = "snake_case")]
-pub fn translate_one(app: AppHandle, text: String, engine: String, request_id: u64) {
-    if !crate::pipeline::claim_engine(request_id, &engine) {
+pub fn translate_one(
+    app: AppHandle,
+    text: String,
+    engine: String,
+    request_id: u64,
+    translation_revision: u64,
+    source_language: String,
+    target_language: String,
+) {
+    if !crate::translate::is_supported_language(&source_language)
+        || target_language == "auto"
+        || !crate::translate::is_supported_language(&target_language)
+        || source_language == target_language
+    {
+        return;
+    }
+    if !crate::pipeline::claim_engine(request_id, translation_revision, &engine) {
         return;
     }
     let rt = crate::runtime::handle().clone();
     std::thread::spawn(move || {
-        let target = crate::translate::auto_target(&text).to_string();
-        emit_translation(&app, request_id, "start", String::new(), &engine);
+        emit_translation(
+            &app,
+            request_id,
+            translation_revision,
+            "start",
+            String::new(),
+            &engine,
+        );
 
         if engine == crate::translate::google::ENGINE_LLM {
             let cfg = crate::settings::current();
@@ -28,6 +49,7 @@ pub fn translate_one(app: AppHandle, text: String, engine: String, request_id: u
                 emit_translation(
                     &app,
                     request_id,
+                    translation_revision,
                     "error",
                     "AI 引擎未配置 API Key".into(),
                     &engine,
@@ -42,34 +64,89 @@ pub fn translate_one(app: AppHandle, text: String, engine: String, request_id: u
             let chunk_app = app.clone();
             let chunk_engine = engine.clone();
             let mut on_chunk = move |chunk: String| {
-                emit_translation(&chunk_app, request_id, "chunk", chunk, &chunk_engine);
+                emit_translation(
+                    &chunk_app,
+                    request_id,
+                    translation_revision,
+                    "chunk",
+                    chunk,
+                    &chunk_engine,
+                );
             };
             match rt.block_on(crate::translate::llm::translate_stream(
                 &llm_cfg,
                 &text,
-                &target,
+                &source_language,
+                &target_language,
                 &mut on_chunk,
             )) {
                 Ok(full) if !full.trim().is_empty() => {
-                    emit_translation(&app, request_id, "done", full, &engine);
+                    emit_translation(
+                        &app,
+                        request_id,
+                        translation_revision,
+                        "done",
+                        full,
+                        &engine,
+                    );
                 }
                 Ok(_) => {
-                    emit_translation(&app, request_id, "error", "empty".into(), &engine);
+                    emit_translation(
+                        &app,
+                        request_id,
+                        translation_revision,
+                        "error",
+                        "empty".into(),
+                        &engine,
+                    );
                 }
                 Err(error) => {
                     crate::logger::warn(&format!("[translate/llm] request={request_id} {error}"));
-                    emit_translation(&app, request_id, "error", error, &engine);
+                    emit_translation(
+                        &app,
+                        request_id,
+                        translation_revision,
+                        "error",
+                        error,
+                        &engine,
+                    );
                 }
             }
             return;
         }
 
-        match rt.block_on(crate::pipeline::run_engine(&engine, &text, &target)) {
+        match rt.block_on(crate::pipeline::run_engine(
+            &engine,
+            &text,
+            &source_language,
+            &target_language,
+        )) {
             Ok(translated) if !translated.trim().is_empty() => {
-                emit_translation(&app, request_id, "done", translated, &engine);
+                emit_translation(
+                    &app,
+                    request_id,
+                    translation_revision,
+                    "done",
+                    translated,
+                    &engine,
+                );
             }
-            Ok(_) => emit_translation(&app, request_id, "error", "empty".into(), &engine),
-            Err(error) => emit_translation(&app, request_id, "error", error, &engine),
+            Ok(_) => emit_translation(
+                &app,
+                request_id,
+                translation_revision,
+                "error",
+                "empty".into(),
+                &engine,
+            ),
+            Err(error) => emit_translation(
+                &app,
+                request_id,
+                translation_revision,
+                "error",
+                error,
+                &engine,
+            ),
         }
     });
 }
@@ -77,6 +154,7 @@ pub fn translate_one(app: AppHandle, text: String, engine: String, request_id: u
 fn emit_translation(
     app: &AppHandle,
     request_id: u64,
+    translation_revision: u64,
     phase: &'static str,
     text: String,
     service: &str,
@@ -85,6 +163,7 @@ fn emit_translation(
         crate::pipeline::TRANSLATE_EVENT,
         crate::pipeline::TranslateEvent {
             request_id,
+            translation_revision,
             phase,
             text,
             service: service.into(),
@@ -266,9 +345,14 @@ pub async fn test_llm(config: crate::settings::LlmSettings) -> Result<u64, Strin
         model: config.model,
     };
     let started = std::time::Instant::now();
-    let result =
-        crate::translate::llm::translate_stream(&config, "Good morning.", "zh-CN", &mut |_| {})
-            .await;
+    let result = crate::translate::llm::translate_stream(
+        &config,
+        "Good morning.",
+        "en",
+        "zh-CN",
+        &mut |_| {},
+    )
+    .await;
     match result {
         Ok(_) => Ok(started.elapsed().as_millis() as u64),
         Err(error) => {

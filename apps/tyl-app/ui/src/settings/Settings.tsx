@@ -18,6 +18,11 @@ import {
   tr,
   type LanguagePreference,
 } from "../shared/i18n";
+import {
+  languageLabel,
+  TRANSLATION_LANGUAGES,
+  type TranslationLanguage,
+} from "../shared/languages";
 
 interface Llm {
   enabled: boolean;
@@ -33,12 +38,20 @@ interface DictionarySettings {
   enabled: boolean;
   provider: "auto" | "youdao" | "iciba" | "bing";
 }
+interface LanguageRoutingSettings {
+  mode: "smart" | "fixed_target" | "fixed_pair";
+  primary: TranslationLanguage;
+  secondary: TranslationLanguage;
+  source: TranslationLanguage;
+  target: TranslationLanguage;
+}
 interface SettingsData {
   language: LanguagePreference;
   hotkey: string;
   /** 有序启用引擎；第一个 = 主引擎（弹窗 tab 顺序同此） */
   engines: string[];
   result_display: "tabs" | "stacked";
+  language_routing: LanguageRoutingSettings;
   theme: Theme;
   color_scheme: ColorScheme;
   show_source: boolean;
@@ -262,6 +275,23 @@ export function Settings() {
 
   const patchDictionary = (p: Partial<DictionarySettings>) => {
     patch({ dictionary: { ...s()!.dictionary, ...p } });
+  };
+
+  const patchLanguageRouting = (p: Partial<LanguageRoutingSettings>) => {
+    patch({ language_routing: { ...s()!.language_routing, ...p } });
+  };
+
+  const setRoutingLanguage = (
+    field: "primary" | "secondary" | "source" | "target",
+    value: TranslationLanguage,
+  ) => {
+    const routing = s()!.language_routing;
+    const paired = field === "primary" ? "secondary"
+      : field === "secondary" ? "primary"
+        : field === "source" ? "target" : "source";
+    const next: LanguageRoutingSettings = { ...routing, [field]: value };
+    if (next[paired] === value) next[paired] = routing[field];
+    patch({ language_routing: next });
   };
 
   const testLlm = async () => {
@@ -677,6 +707,56 @@ export function Settings() {
                 </Show>
 
                 <Show when={tab() === "translate"}>
+                  <section class="group language-routing-group">
+                    <div class="group-title">{tr("翻译方向", "Translation direction")}</div>
+                    <div class="seg routing-modes" role="radiogroup" aria-label={tr("翻译方向模式", "Translation direction mode")}>
+                      {[
+                        ["smart", tr("智能互译", "Smart")],
+                        ["fixed_target", tr("固定目标", "Fixed target")],
+                        ["fixed_pair", tr("固定语言对", "Fixed pair")],
+                      ].map(([mode, label]) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={cur().language_routing.mode === mode}
+                          classList={{ active: cur().language_routing.mode === mode }}
+                          onClick={() => patchLanguageRouting({ mode: mode as LanguageRoutingSettings["mode"] })}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <Show when={cur().language_routing.mode === "smart"}>
+                      <p class="hint routing-hint">
+                        {tr("主语言文本译为第二语言，其他语言统一译为主语言。默认即“中文 → 英文，其他 → 中文”。", "Primary-language text goes to the secondary language; every other language goes to the primary language.")}
+                      </p>
+                      <div class="language-pair">
+                        <LanguageSelect id="routing-primary" label={tr("主语言", "Primary")} value={cur().language_routing.primary} onChange={(value) => setRoutingLanguage("primary", value)} />
+                        <span class="language-pair-mark" aria-hidden="true">⇄</span>
+                        <LanguageSelect id="routing-secondary" label={tr("第二语言", "Secondary")} value={cur().language_routing.secondary} onChange={(value) => setRoutingLanguage("secondary", value)} />
+                      </div>
+                    </Show>
+                    <Show when={cur().language_routing.mode === "fixed_target"}>
+                      <p class="hint routing-hint">{tr("自动识别原文语言，并始终翻译为指定语言。", "Detect the source automatically and always translate to the selected language.")}</p>
+                      <div class="language-pair">
+                        <div class="routing-auto-language">
+                          <span>{tr("源语言", "Source")}</span>
+                          <strong>{languageLabel("auto")}</strong>
+                        </div>
+                        <span class="language-pair-mark" aria-hidden="true">→</span>
+                        <LanguageSelect id="routing-target" label={tr("目标语言", "Target")} value={cur().language_routing.target} onChange={(value) => setRoutingLanguage("target", value)} />
+                      </div>
+                    </Show>
+                    <Show when={cur().language_routing.mode === "fixed_pair"}>
+                      <p class="hint routing-hint">{tr("原文和译文语言均固定，适合稳定的双语工作流。", "Fix both languages for a predictable bilingual workflow.")}</p>
+                      <div class="language-pair">
+                        <LanguageSelect id="routing-source" label={tr("源语言", "Source")} value={cur().language_routing.source} onChange={(value) => setRoutingLanguage("source", value)} />
+                        <span class="language-pair-mark" aria-hidden="true">→</span>
+                        <LanguageSelect id="routing-pair-target" label={tr("目标语言", "Target")} value={cur().language_routing.target} onChange={(value) => setRoutingLanguage("target", value)} />
+                      </div>
+                    </Show>
+                  </section>
+
                   <section class="group display-group">
                     <div class="group-title">{tr("结果呈现", "Result layout")}</div>
                     <div class="display-options">
@@ -983,5 +1063,37 @@ export function Settings() {
         )}
       </Show>
     </>
+  );
+}
+
+function LanguageSelect(props: {
+  id: string;
+  label: string;
+  value: TranslationLanguage;
+  onChange: (value: TranslationLanguage) => void;
+}) {
+  return (
+    <label class="routing-language" for={props.id}>
+      <span>{props.label}</span>
+      <span class="select-wrap">
+        <select
+          id={props.id}
+          class="input"
+          value={props.value}
+          onChange={(event) =>
+            props.onChange(event.currentTarget.value as TranslationLanguage)
+          }
+        >
+          <For each={TRANSLATION_LANGUAGES}>
+            {(language) => (
+              <option value={language}>{languageLabel(language)}</option>
+            )}
+          </For>
+        </select>
+        <span class="select-chevron">
+          <Icon name="down" size={15} />
+        </span>
+      </span>
+    </label>
   );
 }

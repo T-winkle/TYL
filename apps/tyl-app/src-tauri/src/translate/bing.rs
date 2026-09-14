@@ -160,8 +160,12 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// 翻译。源语言省略（服务端 auto 检测，响应带 detectedLanguage）。
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
-    let path = format!("{ENDPOINT}&to={}", map_target(target));
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
+    let mut path = format!("{ENDPOINT}&to={}", map_target(target));
+    if source != "auto" {
+        path.push_str("&from=");
+        path.push_str(&map_target(source));
+    }
     let client = super::client();
     let resp = client
         .post(format!("https://{path}"))
@@ -204,6 +208,19 @@ mod tests {
             ),
             "api.cognitive.microsofttranslator.com%2Ftranslate%3Fapi-version%3D3.0%26to%3Dzh-Hans"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "Opt-in: sends fixed multilingual fixtures to Bing"]
+    async fn live_fixed_language_pair_smoke() {
+        for (text, source, target) in [
+            ("Bonjour tout le monde.", "fr", "en"),
+            ("Good morning.", "en", "ja"),
+            ("繁體中文翻譯測試。", "zh-TW", "en"),
+        ] {
+            let translated = translate(text, source, target).await.unwrap();
+            assert!(!translated.trim().is_empty(), "{source} -> {target}");
+        }
     }
 
     #[test]

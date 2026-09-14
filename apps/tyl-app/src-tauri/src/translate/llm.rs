@@ -177,30 +177,36 @@ fn nonempty(text: String) -> Result<String, String> {
 pub async fn translate_stream(
     cfg: &LlmConfig,
     text: &str,
+    source: &str,
     target: &str,
     on_chunk: &mut (dyn FnMut(String) + Send),
 ) -> Result<String, String> {
     validate(cfg)?;
-    translate_using(super::client(), cfg, text, target, on_chunk).await
+    translate_using(super::client(), cfg, text, source, target, on_chunk).await
 }
 
 async fn translate_using(
     client: reqwest::Client,
     cfg: &LlmConfig,
     text: &str,
+    source: &str,
     target: &str,
     on_chunk: &mut (dyn FnMut(String) + Send),
 ) -> Result<String, String> {
-    let target_name = if target == "zh-CN" {
-        "简体中文"
+    let target_name = language_name(target);
+    let direction = if source == "auto" {
+        format!("Translate the user's text to {target_name}.")
     } else {
-        "English"
+        format!(
+            "Translate the user's text from {} to {target_name}.",
+            language_name(source)
+        )
     };
     // Reasoning models may reject optional sampling parameters (temperature).
     let body = json!({
         "model": cfg.model.trim(), "stream": true,
         "messages": [
-            {"role": "system", "content": format!("You are a translation engine. Translate the user's text to {target_name}. Output ONLY the translation, no explanations, no quotes.")},
+            {"role": "system", "content": format!("You are a translation engine. {direction} Output ONLY the translation, no explanations, no quotes.")},
             {"role": "user", "content": text}
         ]
     });
@@ -264,6 +270,22 @@ async fn translate_using(
         full.chars().count()
     ));
     Ok(full)
+}
+
+fn language_name(language: &str) -> &'static str {
+    match language {
+        "zh-CN" => "Simplified Chinese",
+        "zh-TW" => "Traditional Chinese",
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "fr" => "French",
+        "de" => "German",
+        "es" => "Spanish",
+        "ru" => "Russian",
+        "pt" => "Portuguese",
+        _ => "the requested language",
+    }
 }
 
 #[cfg(test)]
@@ -336,7 +358,7 @@ mod tests {
             let (cfg, server) = local_response(status, mime, body);
             let client = reqwest::Client::builder().no_proxy().build().unwrap();
             let mut chunks = String::new();
-            let result = crate::runtime::handle().block_on(translate_using(client, &cfg, "Good morning.", "zh-CN", &mut |text| chunks.push_str(&text)));
+            let result = crate::runtime::handle().block_on(translate_using(client, &cfg, "Good morning.", "en", "zh-CN", &mut |text| chunks.push_str(&text)));
             server.join().unwrap();
             match expected {
                 Some(expected) => { assert_eq!(result.unwrap(), expected); assert_eq!(chunks, expected); },
@@ -361,6 +383,7 @@ mod tests {
         let result = crate::runtime::handle().block_on(translate_stream(
             &cfg,
             "Good morning.",
+            "en",
             "zh-CN",
             &mut |_| {
                 chunks += 1;

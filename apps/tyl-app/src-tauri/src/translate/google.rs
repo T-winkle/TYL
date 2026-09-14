@@ -12,13 +12,13 @@ fn endpoint() -> &'static str {
 }
 
 /// 一次性翻译。源语言 auto 检测。
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let client = super::client();
     let resp = client
         .get(endpoint())
         .query(&[
             ("client", "gtx"),
-            ("sl", "auto"),
+            ("sl", source),
             ("tl", target),
             ("dt", "t"),
             ("q", text),

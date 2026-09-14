@@ -22,16 +22,20 @@ pub(crate) const TRANSLATE_EVENT: &str = "tyl://translate";
 #[derive(Default)]
 struct EngineRequests {
     request_id: u64,
+    translation_revision: u64,
     engines: HashSet<String>,
 }
 
 impl EngineRequests {
-    fn claim(&mut self, request_id: u64, engine: &str) -> bool {
-        if request_id < self.request_id {
+    fn claim(&mut self, request_id: u64, translation_revision: u64, engine: &str) -> bool {
+        if request_id < self.request_id
+            || request_id == self.request_id && translation_revision < self.translation_revision
+        {
             return false;
         }
-        if request_id > self.request_id {
+        if request_id > self.request_id || translation_revision > self.translation_revision {
             self.request_id = request_id;
+            self.translation_revision = translation_revision;
             self.engines.clear();
         }
         self.engines.insert(engine.into())
@@ -40,10 +44,13 @@ impl EngineRequests {
 
 // Eager translation, fallback and lazy tabs share ownership of each engine.
 // Retain only one capture's IDs, never source text or translation results.
-pub(crate) fn claim_engine(request_id: u64, engine: &str) -> bool {
+pub(crate) fn claim_engine(request_id: u64, translation_revision: u64, engine: &str) -> bool {
     static REQUESTS: std::sync::LazyLock<Mutex<EngineRequests>> =
         std::sync::LazyLock::new(|| Mutex::new(EngineRequests::default()));
-    REQUESTS.lock().unwrap().claim(request_id, engine)
+    REQUESTS
+        .lock()
+        .unwrap()
+        .claim(request_id, translation_revision, engine)
 }
 
 /// 推给前端的事件载荷（Popup.tsx 的 CapturedPayload 对应）。
@@ -59,6 +66,10 @@ pub struct CapturedEvent {
     pub engines: Vec<String>,
     /// "tabs"（按需切换）| "stacked"（全部展开）。
     pub result_display: String,
+    pub source_language: String,
+    pub detected_source_language: String,
+    pub target_language: String,
+    pub translation_revision: u64,
     /// 初始窗口位于选区上方；后续增高时保持底边，避免盖住原文。
     pub grow_upward: bool,
     pub theme: String,
@@ -89,6 +100,7 @@ pub struct TranslateEvent {
     pub text: String,
     /// 使用的服务（"bing" / "youdao" / "transmart" / "llm" / "dict"…）。
     pub service: String,
+    pub translation_revision: u64,
 }
 
 /// 管线状态：持有平台取词器 + 防抖计数。
@@ -125,13 +137,24 @@ impl Pipeline {
 /// 取词完成即触发翻译或词典（不等弹窗显示——网络往返与渲染并行）。
 /// 整句先请求主引擎，失败时按配置顺序自动降级；其他 tab 仍按需加载。
 /// 单词走词典卡片，LLM 保持流式。代际号防抖：旧任务事件被丢弃。
-fn spawn_translation(app: AppHandle, pipeline: &Pipeline, gen: u64, text: String) {
+fn spawn_translation(
+    app: AppHandle,
+    pipeline: &Pipeline,
+    gen: u64,
+    text: String,
+    direction: translate::TranslationDirection,
+) {
     let rt = pipeline.rt.clone();
     let cfg = crate::settings::current();
-    let is_word = cfg.dictionary.enabled && translate::dictionary::is_single_word(&text);
+    let is_word = cfg.dictionary.enabled
+        && direction.target == "zh-CN"
+        && translate::dictionary::is_single_word(&text);
     let guard = GenerationGuard {
         generation: Arc::clone(&pipeline.generation),
         request_id: gen,
+        translation_revision: 0,
+        source_language: direction.source,
+        target_language: direction.target,
     };
 
     let app_emit = app.clone();
@@ -171,6 +194,9 @@ fn spawn_translation(app: AppHandle, pipeline: &Pipeline, gen: u64, text: String
 struct GenerationGuard {
     generation: Arc<AtomicU64>,
     request_id: u64,
+    translation_revision: u64,
+    source_language: String,
+    target_language: String,
 }
 
 impl GenerationGuard {
@@ -200,6 +226,7 @@ impl GenerationGuard {
                 phase,
                 text,
                 service: service.into(),
+                translation_revision: self.translation_revision,
             },
         );
         true
@@ -252,7 +279,7 @@ fn translate_all(
         std::thread::spawn(move || {
             if engine == translate::google::ENGINE_LLM {
                 if cfg.llm.api_key.trim().is_empty() {
-                    if !claim_engine(guard.request_id, &engine) {
+                    if !claim_engine(guard.request_id, guard.translation_revision, &engine) {
                         return;
                     }
                     guard.emit(&app, "start", String::new(), &engine);
@@ -263,12 +290,16 @@ fn translate_all(
                 return;
             }
 
-            if !claim_engine(guard.request_id, &engine) {
+            if !claim_engine(guard.request_id, guard.translation_revision, &engine) {
                 return;
             }
             guard.emit(&app, "start", String::new(), &engine);
-            let target = translate::auto_target(&text);
-            match rt.block_on(run_engine(&engine, &text, target)) {
+            match rt.block_on(run_engine(
+                &engine,
+                &text,
+                &guard.source_language,
+                &guard.target_language,
+            )) {
                 Ok(translated) if !translated.trim().is_empty() => {
                     guard.emit(&app, "done", translated, &engine);
                 }
@@ -296,7 +327,7 @@ fn translate_configured(
 ) {
     if primary_is_llm(cfg) {
         if cfg.llm.api_key.trim().is_empty() {
-            if !claim_engine(guard.request_id, "llm") {
+            if !claim_engine(guard.request_id, guard.translation_revision, "llm") {
                 return;
             }
             guard.emit(app, "start", String::new(), "llm");
@@ -321,15 +352,20 @@ fn fallback_engine_ids(cfg: &crate::settings::Settings, skip: Option<&str>) -> V
 }
 
 /// 单引擎执行（返回译文）。engine 是 service id（"bing"/"youdao"/…）。
-pub async fn run_engine(engine: &str, text: &str, target: &str) -> Result<String, String> {
+pub async fn run_engine(
+    engine: &str,
+    text: &str,
+    source: &str,
+    target: &str,
+) -> Result<String, String> {
     match engine {
-        "bing" => translate::bing::translate(text, target).await,
-        "youdao" => translate::youdao::translate(text, target).await,
-        "transmart" => translate::transmart::translate(text, target).await,
-        "yandex" => translate::yandex::translate(text, target).await,
-        "iciba" => translate::iciba::translate(text, target).await,
-        "mymemory" => translate::mymemory::translate(text, target).await,
-        "google" => translate::google::translate(text, target).await,
+        "bing" => translate::bing::translate(text, source, target).await,
+        "youdao" => translate::youdao::translate(text, source, target).await,
+        "transmart" => translate::transmart::translate(text, source, target).await,
+        "yandex" => translate::yandex::translate(text, source, target).await,
+        "iciba" => translate::iciba::translate(text, source, target).await,
+        "mymemory" => translate::mymemory::translate(text, source, target).await,
+        "google" => translate::google::translate(text, source, target).await,
         _ => Err(format!("unknown engine: {engine}")),
     }
 }
@@ -343,16 +379,20 @@ fn translate_primary(
     guard: &GenerationGuard,
     skip: Option<&str>,
 ) {
-    let target = translate::auto_target(text).to_string();
     for engine in fallback_engine_ids(cfg, skip) {
         if guard.is_stale() {
             return;
         }
-        if !claim_engine(guard.request_id, &engine) {
+        if !claim_engine(guard.request_id, guard.translation_revision, &engine) {
             continue;
         }
         guard.emit(app, "start", String::new(), &engine);
-        match rt.block_on(run_engine(&engine, text, &target)) {
+        match rt.block_on(run_engine(
+            &engine,
+            text,
+            &guard.source_language,
+            &guard.target_language,
+        )) {
             Ok(t) if !t.trim().is_empty() => {
                 guard.emit(app, "done", t, &engine);
                 return;
@@ -381,7 +421,7 @@ fn translate_llm(
     let emit = |phase: &'static str, chunk: String| {
         guard.emit(app, phase, chunk, "llm");
     };
-    if !claim_engine(guard.request_id, "llm") {
+    if !claim_engine(guard.request_id, guard.translation_revision, "llm") {
         return;
     }
     emit("start", String::new());
@@ -391,7 +431,6 @@ fn translate_llm(
         api_key: cfg.llm.api_key.clone(),
         model: cfg.llm.model.clone(),
     };
-    let target = translate::auto_target(text);
     let mut streamed_any = false;
     let mut on_chunk = |c: String| {
         streamed_any = true;
@@ -401,7 +440,8 @@ fn translate_llm(
     match rt.block_on(translate::llm::translate_stream(
         &llm_cfg,
         text,
-        target,
+        &guard.source_language,
+        &guard.target_language,
         &mut on_chunk,
     )) {
         Ok(full) if !full.trim().is_empty() => {
@@ -474,6 +514,10 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
             if text.is_empty() {
                 return Ok(());
             }
+            let direction = translate::resolve_direction(&text, &cfg.language_routing);
+            let use_dictionary = cfg.dictionary.enabled
+                && direction.target == "zh-CN"
+                && translate::dictionary::is_single_word(&text);
             let can_replace = crate::desktop_actions::can_offer_replacement(
                 t.editable,
                 anchor.target_exe.as_deref(),
@@ -561,13 +605,17 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
                 target_exe: anchor.target_exe,
                 engines: cfg.engines.clone(),
                 result_display: cfg.result_display.clone(),
+                source_language: direction.source.clone(),
+                detected_source_language: direction.detected_source.clone(),
+                target_language: direction.target.clone(),
+                translation_revision: 0,
                 grow_upward,
                 theme: cfg.theme.clone(),
                 color_scheme: cfg.color_scheme.clone(),
                 language: cfg.language.clone(),
                 show_source: cfg.show_source,
                 is_word: translate::dictionary::is_single_word(&text),
-                dictionary: cfg.dictionary.enabled,
+                dictionary: use_dictionary,
                 can_replace,
                 replace_requires_verification: can_replace && t.editable.is_none(),
                 #[cfg(feature = "memory-bench")]
@@ -577,7 +625,7 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
 
             // 6.5 翻译与窗口显示并行：网络往返（100ms+）不等渲染，
             // 弹窗亮起时译文已在路上（多引擎各自完成即推送）。
-            spawn_translation(app.clone(), pipeline, gen, text);
+            spawn_translation(app.clone(), pipeline, gen, text, direction);
 
             // 给前端一帧的渲染时间（事件监听 + SolidJS 细粒度更新）。
             std::thread::sleep(Duration::from_millis(30));
@@ -603,6 +651,10 @@ pub(crate) fn benchmark_present(
     let window = app.get_webview_window("popup").ok_or("no popup")?;
     let gen = pipeline.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let cfg = crate::settings::current();
+    let direction = translate::resolve_direction(text, &cfg.language_routing);
+    let use_dictionary = cfg.dictionary.enabled
+        && direction.target == "zh-CN"
+        && translate::dictionary::is_single_word(text);
     let _ = window.set_size(tauri::LogicalSize::new(560.0, 260.0));
     let _ = window.center();
     crate::logger::log_str(&format!("[memory-bench] present id={gen}"));
@@ -620,20 +672,24 @@ pub(crate) fn benchmark_present(
             target_exe: None,
             engines: cfg.engines,
             result_display: cfg.result_display,
+            source_language: direction.source.clone(),
+            detected_source_language: direction.detected_source.clone(),
+            target_language: direction.target.clone(),
+            translation_revision: 0,
             grow_upward: false,
             theme: cfg.theme,
             color_scheme: cfg.color_scheme,
             language: cfg.language,
             show_source: cfg.show_source,
             is_word: translate::dictionary::is_single_word(text),
-            dictionary: cfg.dictionary.enabled,
+            dictionary: use_dictionary,
             can_replace: false,
             replace_requires_verification: false,
             benchmark: true,
         },
     )
     .map_err(|e| e.to_string())?;
-    spawn_translation(app.clone(), pipeline, gen, text.into());
+    spawn_translation(app.clone(), pipeline, gen, text.into(), direction);
     std::thread::sleep(Duration::from_millis(30));
     window_ctl::show_focused(&window);
     Ok(gen)
@@ -644,13 +700,13 @@ mod tests {
     #[test]
     fn eager_lazy_and_fallback_claim_an_engine_only_once_per_capture() {
         let mut requests = super::EngineRequests::default();
-        assert!(requests.claim(10, "bing"));
-        assert!(!requests.claim(10, "bing"));
-        assert!(requests.claim(10, "llm"));
-        assert!(requests.claim(11, "bing"));
-        assert!(!requests.claim(10, "youdao"));
-        assert!(requests.claim(11, "llm"));
-        assert_eq!(requests.engines.len(), 2);
+        assert!(requests.claim(10, 0, "bing"));
+        assert!(!requests.claim(10, 0, "bing"));
+        assert!(requests.claim(10, 0, "llm"));
+        assert!(requests.claim(10, 1, "bing"));
+        assert!(!requests.claim(10, 0, "youdao"));
+        assert!(requests.claim(11, 0, "llm"));
+        assert_eq!(requests.engines.len(), 1);
     }
     use super::*;
 
@@ -678,6 +734,9 @@ mod tests {
         let guard = GenerationGuard {
             generation: Arc::clone(&generation),
             request_id: 7,
+            translation_revision: 0,
+            source_language: "auto".into(),
+            target_language: "zh-CN".into(),
         };
 
         assert!(!guard.is_stale());

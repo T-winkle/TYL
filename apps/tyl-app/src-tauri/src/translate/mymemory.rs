@@ -12,22 +12,27 @@ use serde_json::Value;
 
 /// 翻译。源语言自动检测（langpair=Autodetect|<target>）。
 /// 匿名接口单次最多 500 字符；保守按 450 UTF-16 units 自然分段。
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let parts = super::iciba::split_text(text, 450);
     let mut translated = Vec::with_capacity(parts.len());
     for part in &parts {
         if part.trim().is_empty() {
             translated.push(String::new());
         } else {
-            translated.push(translate_part(part.trim(), target).await?);
+            translated.push(translate_part(part.trim(), source, target).await?);
         }
     }
     Ok(super::iciba::join_translations(&parts, &translated))
 }
 
-async fn translate_part(text: &str, target: &str) -> Result<String, String> {
+async fn translate_part(text: &str, source: &str, target: &str) -> Result<String, String> {
     let client = super::client();
-    let langpair = format!("Autodetect|{}", map_target(target));
+    let source = if source == "auto" {
+        "Autodetect"
+    } else {
+        source
+    };
+    let langpair = format!("{}|{}", map_target(source), map_target(target));
     let resp = client
         .get("https://api.mymemory.translated.net/get")
         .query(&[("q", text), ("langpair", langpair.as_str())])
@@ -78,7 +83,7 @@ mod tests {
     #[ignore = "Opt-in: sends fixed public fixtures to MyMemory"]
     async fn live_long_text_smoke() {
         let input = "Every sentence must remain present. ".repeat(35) + "FINAL7391";
-        let translated = super::translate(&input, "zh-CN").await.unwrap();
+        let translated = super::translate(&input, "auto", "zh-CN").await.unwrap();
         assert!(translated.contains("7391"));
     }
 }

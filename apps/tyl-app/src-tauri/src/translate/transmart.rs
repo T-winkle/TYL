@@ -23,7 +23,7 @@ fn map_target(target: &str) -> String {
 }
 
 /// 翻译。源语言 auto 检测（服务端）。
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let client = super::client();
     let resp = client
         .post(ENDPOINT)
@@ -37,7 +37,7 @@ pub async fn translate(text: &str, target: &str) -> Result<String, String> {
             "type": "plain",
             "model_category": "normal",
             "source": {
-                "lang": "auto",
+                "lang": map_target(source),
                 "text_block": text,
             },
             "target": {

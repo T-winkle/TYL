@@ -13,7 +13,7 @@ const WORD_PAGE: &str = "https://www.iciba.com/word";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/127 Safari/537.36";
 
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     // The batch endpoint starts failing around 4k characters. A conservative
     // boundary leaves headroom for non-ASCII input and future server changes.
     let parts = split_text(text, 1_600);
@@ -22,7 +22,7 @@ pub async fn translate(text: &str, target: &str) -> Result<String, String> {
             if part.trim().is_empty() {
                 Ok(String::new())
             } else {
-                translate_part(part.trim(), target).await
+                translate_part(part.trim(), source, target).await
             }
         })
         .buffered(3)
@@ -31,7 +31,7 @@ pub async fn translate(text: &str, target: &str) -> Result<String, String> {
     Ok(join_translations(&parts, &translated))
 }
 
-async fn translate_part(text: &str, target: &str) -> Result<String, String> {
+async fn translate_part(text: &str, source: &str, target: &str) -> Result<String, String> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -40,10 +40,12 @@ async fn translate_part(text: &str, target: &str) -> Result<String, String> {
     let raw = format!("{TRANSLATE_PATH}{CLIENT}{KEY}{timestamp}{SIGNATURE_SALT}");
     let signature = super::youdao::md5_hex(&raw);
     let target = normalize_language(target);
-    let source = if super::auto_target(text) == "en" {
+    // Preserve the historically more reliable explicit Chinese direction;
+    // other automatic sources remain provider-detected.
+    let source = if source == "auto" && contains_han(text) {
         "zh"
     } else {
-        "auto"
+        normalize_language(source)
     };
     let payload = serde_json::json!({
         "from": source,
@@ -133,6 +135,12 @@ fn normalize_language(language: &str) -> &str {
         "zh-TW" => "cht",
         other => other,
     }
+}
+
+fn contains_han(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(ch, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
+    })
 }
 
 pub(crate) fn split_text(mut text: &str, limit: usize) -> Vec<&str> {
@@ -227,6 +235,7 @@ mod tests {
     async fn live_translation_and_dictionary_smoke() {
         let translated = translate(
             &("Every segment must remain complete. ".repeat(100) + "Final marker 7391."),
+            "auto",
             "zh-CN",
         )
         .await

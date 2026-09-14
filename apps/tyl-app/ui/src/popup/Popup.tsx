@@ -19,6 +19,13 @@ import {
   tr,
   type LanguagePreference,
 } from "../shared/i18n";
+import {
+  languageLabel,
+  shortLanguageLabel,
+  TRANSLATION_LANGUAGES,
+  type SourceLanguage,
+  type TranslationLanguage,
+} from "../shared/languages";
 
 interface CapturedPayload {
   request_id: number;
@@ -28,6 +35,10 @@ interface CapturedPayload {
   target_exe: string | null;
   engines: string[];
   result_display: "tabs" | "stacked";
+  source_language: SourceLanguage;
+  detected_source_language: SourceLanguage;
+  target_language: TranslationLanguage;
+  translation_revision: number;
   grow_upward: boolean;
   theme: Theme;
   color_scheme: ColorScheme;
@@ -44,6 +55,7 @@ interface TranslatePayload {
   phase: string;
   text: string;
   service: string;
+  translation_revision: number;
 }
 interface DictEntry {
   word: string;
@@ -81,6 +93,11 @@ export function Popup() {
   const [sourceExpanded, setSourceExpanded] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [visible, setVisible] = createSignal(false);
+  const [sourceLanguage, setSourceLanguage] = createSignal<SourceLanguage>("auto");
+  const [detectedSourceLanguage, setDetectedSourceLanguage] = createSignal<SourceLanguage>("auto");
+  const [targetLanguage, setTargetLanguage] = createSignal<TranslationLanguage>("zh-CN");
+  const [translationRevision, setTranslationRevision] = createSignal(0);
+  const [directionOpen, setDirectionOpen] = createSignal(false);
   const [entered, setEntered] = createSignal(false);
   const [notice, setNotice] = createSignal("");
   const [noticeError, setNoticeError] = createSignal(false);
@@ -113,6 +130,8 @@ export function Popup() {
     dragOrigin = { x: event.clientX, y: event.clientY };
   };
   const engineIds = () => captured()?.engines ?? [];
+  const displayedSourceLanguage = () =>
+    sourceLanguage() === "auto" ? detectedSourceLanguage() : sourceLanguage();
   const current = () => engines().find((e) => e.service === active());
   const dictionaryView = () => (dictPending() || Boolean(dict())) && !wordTranslations();
   const stacked = () =>
@@ -147,6 +166,7 @@ export function Popup() {
     stopAudio();
     setEntered(false);
     setVisible(false);
+    setDirectionOpen(false);
     await invoke("hide_popup");
   };
   const copy = async (text: string) => {
@@ -244,6 +264,7 @@ export function Popup() {
     }
   };
   const applyEvent = (p: TranslatePayload) => {
+    if (p.translation_revision !== translationRevision()) return;
     if (p.phase === "dict") {
       try {
         setDict(JSON.parse(p.text));
@@ -304,7 +325,7 @@ export function Popup() {
       events.push(p);
       pending.set(p.request_id, events);
       if (pending.size > 4) pending.delete(Math.min(...pending.keys()));
-    } else if (p.request_id === id) applyEvent(p);
+    } else if (p.request_id === id && p.translation_revision === translationRevision()) applyEvent(p);
   };
   const present = (payload: CapturedPayload) => {
     stopAudio();
@@ -312,6 +333,11 @@ export function Popup() {
     window.cancelAnimationFrame(enterFrame);
     lastHeight = 0;
     setCaptured(payload);
+    setSourceLanguage(payload.source_language ?? "auto");
+    setDetectedSourceLanguage(payload.detected_source_language ?? "auto");
+    setTargetLanguage(payload.target_language ?? "zh-CN");
+    setTranslationRevision(payload.translation_revision ?? 0);
+    setDirectionOpen(false);
     applyLanguage(payload.language ?? "system");
     document.title = tr("TYL 划词翻译", "TYL Selection Translator");
     applyTheme(payload.theme ?? "system", payload.color_scheme ?? "indigo");
@@ -340,22 +366,63 @@ export function Popup() {
       if (id <= payload.request_id) pending.delete(id);
     events.forEach(applyEvent);
   };
-  const ensureEngine = (service: string) => {
+  const requestEngine = (
+    service: string,
+    source: SourceLanguage,
+    target: TranslationLanguage,
+    revision: number,
+  ) => {
     const payload = captured();
-    if (!payload || !payload.engines.includes(service) || engines().some((e) => e.service === service)) return;
+    if (!payload || !payload.engines.includes(service)) return;
     setEngines((prev) => [...prev, { service, status: "loading", text: "" }]);
     void invoke("translate_one", {
       text: payload.text,
       engine: service,
       request_id: payload.request_id,
+      translation_revision: revision,
+      source_language: source,
+      target_language: target,
     }).catch((e) =>
       onTranslate({
         request_id: payload.request_id,
         service,
         phase: "error",
         text: String(e),
+        translation_revision: revision,
       }),
     );
+  };
+  const ensureEngine = (service: string) => {
+    if (engines().some((e) => e.service === service)) return;
+    requestEngine(service, sourceLanguage(), targetLanguage(), translationRevision());
+  };
+  const retranslate = (source: SourceLanguage, target: TranslationLanguage) => {
+    if (source === target) return;
+    const nextRevision = translationRevision() + 1;
+    setSourceLanguage(source);
+    if (source !== "auto") setDetectedSourceLanguage(source);
+    setTargetLanguage(target);
+    setTranslationRevision(nextRevision);
+    setDirectionOpen(false);
+    setDict(null);
+    setDictPending(false);
+    setWordTranslations(true);
+    setEngines([]);
+    const first = engineIds()[0] ?? "";
+    setActive(first);
+    setCollapsed(new Set<string>());
+    if (captured()?.result_display === "stacked") {
+      engineIds().forEach((service) =>
+        requestEngine(service, source, target, nextRevision),
+      );
+    } else if (first) {
+      requestEngine(first, source, target, nextRevision);
+    }
+  };
+  const swapLanguages = () => {
+    const source = displayedSourceLanguage();
+    if (source === "auto" || source === targetLanguage()) return;
+    retranslate(targetLanguage(), source);
   };
   const switchEngine = (service: string) => {
     setActive(service);
@@ -400,6 +467,7 @@ export function Popup() {
     void sourceExpanded();
     void collapsed();
     void wordTranslations();
+    void directionOpen();
     void width();
     if (!captured() || !visible() || resizeTimer) return;
     // Throttle rather than debounce: continuous streaming must still resize.
@@ -457,7 +525,8 @@ export function Popup() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        void hide();
+        if (directionOpen()) setDirectionOpen(false);
+        else void hide();
       }
       if (
         (e.ctrlKey || e.metaKey) &&
@@ -472,11 +541,22 @@ export function Popup() {
       }
     };
     const onResize = () => setWidth(window.innerWidth);
+    const closeDirection = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        directionOpen() &&
+        target instanceof Element &&
+        !target.closest(".language-direction, .direction-panel")
+      )
+        setDirectionOpen(false);
+    };
     window.addEventListener("keydown", onKey);
     window.addEventListener("resize", onResize);
+    window.addEventListener("pointerdown", closeDirection);
     unlisteners.push(
       () => window.removeEventListener("keydown", onKey),
       () => window.removeEventListener("resize", onResize),
+      () => window.removeEventListener("pointerdown", closeDirection),
     );
     unlisteners.push(
       await listen<CapturedPayload>("tyl://captured", (e) =>
@@ -523,11 +603,19 @@ export function Popup() {
                 ? tr("剪贴板取词", "Clipboard capture")
                 : tr("手动输入", "Manual input")}
           </span>
-          <span class="language-label">
-            {isChinese(captured()!.text)
-              ? tr("中文 → 英语", "Chinese → English")
-              : tr("英语 → 中文", "English → Chinese")}
-          </span>
+          <button
+            type="button"
+            class="language-direction"
+            classList={{ active: directionOpen() }}
+            aria-expanded={directionOpen()}
+            title={tr("临时切换本次翻译方向", "Change the direction for this translation")}
+            onClick={() => setDirectionOpen((open) => !open)}
+          >
+            <span>{shortLanguageLabel(displayedSourceLanguage())}</span>
+            <span class="direction-arrow">→</span>
+            <span>{shortLanguageLabel(targetLanguage())}</span>
+            <Icon name="down" size={12} />
+          </button>
           <button
             class="icon-button close"
             onClick={() => void hide()}
@@ -537,6 +625,74 @@ export function Popup() {
             <Icon name="close" size={15} />
           </button>
         </header>
+        <Show when={directionOpen()}>
+          <div
+            class="direction-panel"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <label>
+              <span>{tr("源语言", "Source")}</span>
+              <span class="popup-select-wrap">
+                <select
+                  value={sourceLanguage()}
+                  onChange={(event) =>
+                    retranslate(
+                      event.currentTarget.value as SourceLanguage,
+                      targetLanguage(),
+                    )
+                  }
+                >
+                  <option value="auto">
+                    {detectedSourceLanguage() === "auto"
+                      ? languageLabel("auto")
+                      : `${languageLabel("auto")} · ${languageLabel(detectedSourceLanguage())}`}
+                  </option>
+                  <For each={TRANSLATION_LANGUAGES}>
+                    {(language) => (
+                      <option value={language} disabled={language === targetLanguage()}>
+                        {languageLabel(language)}
+                      </option>
+                    )}
+                  </For>
+                </select>
+                <Icon name="down" size={13} />
+              </span>
+            </label>
+            <button
+              type="button"
+              class="swap-direction"
+              disabled={displayedSourceLanguage() === "auto" || displayedSourceLanguage() === targetLanguage()}
+              title={tr("交换语言", "Swap languages")}
+              aria-label={tr("交换源语言与目标语言", "Swap source and target languages")}
+              onClick={swapLanguages}
+            >
+              ⇄
+            </button>
+            <label>
+              <span>{tr("目标语言", "Target")}</span>
+              <span class="popup-select-wrap">
+                <select
+                  value={targetLanguage()}
+                  onChange={(event) =>
+                    retranslate(
+                      sourceLanguage(),
+                      event.currentTarget.value as TranslationLanguage,
+                    )
+                  }
+                >
+                  <For each={TRANSLATION_LANGUAGES}>
+                    {(language) => (
+                      <option value={language} disabled={language === sourceLanguage()}>
+                        {languageLabel(language)}
+                      </option>
+                    )}
+                  </For>
+                </select>
+                <Icon name="down" size={13} />
+              </span>
+            </label>
+          </div>
+        </Show>
         <Show when={captured()!.show_source}>
           <section
             class="source"
@@ -562,7 +718,7 @@ export function Popup() {
             </Show>
             <div
               class="source-text"
-              lang={isChinese(captured()!.text) ? "zh" : "en"}
+              lang={displayedSourceLanguage() === "auto" ? undefined : displayedSourceLanguage()}
             >
               {captured()!.text}
             </div>
@@ -887,9 +1043,6 @@ function EngineContent(props: { state?: EngineState }) {
       </Show>
     </Show>
   );
-}
-function isChinese(text: string) {
-  return /[\u3400-\u9fff]/.test(text);
 }
 function statusLabel(status?: EngineState["status"]) {
   return status === "done"

@@ -117,14 +117,14 @@ fn sign(q: &str) -> (String, String) {
 
 /// jsonapi_s silently truncates long queries (observed around 600 units).
 /// Stay below that limit, preserve every source byte and keep request order.
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
     let parts = split_query(text, 400);
     let translated: Vec<String> = stream::iter(parts.iter().copied())
         .map(|part| async move {
             if part.trim().is_empty() {
                 return Ok(String::new());
             }
-            translate_part(part.trim(), target).await
+            translate_part(part.trim(), source, target).await
         })
         .buffered(3)
         .try_collect()
@@ -198,14 +198,14 @@ fn is_cjk(ch: char) -> bool {
     matches!(ch, '\u{2e80}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}')
 }
 
-async fn translate_part(text: &str, target: &str) -> Result<String, String> {
+async fn translate_part(text: &str, source: &str, target: &str) -> Result<String, String> {
     let (sgn, t) = sign(text);
     let client = super::client();
     let resp = client
         .post(ENDPOINT)
         .form(&[
             ("q", text),
-            ("from", "auto"),
+            ("from", map_target(source).as_str()),
             ("to", map_target(target).as_str()),
             ("dict", "true"),
             ("t", t.as_str()),
@@ -352,10 +352,10 @@ mod tests {
     async fn long_query_live_smoke() {
         let source =
             "A translator must preserve the whole text. ".repeat(20) + "Finally, the code is 7391.";
-        let result = translate(&source, "zh-CN").await.unwrap();
+        let result = translate(&source, "auto", "zh-CN").await.unwrap();
         assert!(result.contains("7391"), "translation lost the final marker");
         let source = "中文翻译需要保留完整内容。".repeat(60) + "最后的编号是7391。";
-        let result = translate(&source, "en").await.unwrap();
+        let result = translate(&source, "auto", "en").await.unwrap();
         assert!(result.contains("7391"), "translation lost the final marker");
     }
 
@@ -368,7 +368,7 @@ mod tests {
             ("How are you?", "zh-CN"),
             ("你好", "en"),
         ] {
-            let result = translate(source, target).await.unwrap();
+            let result = translate(source, "auto", target).await.unwrap();
             assert!(!result.trim().is_empty(), "empty translation for {source}");
         }
     }

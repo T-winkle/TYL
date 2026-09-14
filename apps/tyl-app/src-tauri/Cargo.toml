@@ -21,6 +21,7 @@ rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
+whatlang = { workspace = true }
 tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
 tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-autostart = "2.5"

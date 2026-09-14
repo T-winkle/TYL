@@ -478,6 +478,62 @@ body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.language-routing-group {
+  gap: 12px;
+}
+.routing-modes {
+  align-self: stretch;
+}
+.routing-hint {
+  margin-top: -3px;
+}
+.language-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
+  align-items: end;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid var(--divider);
+  border-radius: 9px;
+  background: var(--input-bg);
+}
+.routing-language,
+.routing-auto-language {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--fg-secondary);
+  font-size: 10.5px;
+}
+.routing-language .select-wrap {
+  width: 100%;
+}
+.routing-language select {
+  appearance: none;
+  width: 100%;
+  padding-right: 34px;
+  cursor: pointer;
+}
+.routing-auto-language strong {
+  display: flex;
+  align-items: center;
+  height: 35px;
+  padding: 0 12px;
+  border: 1px solid var(--divider);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.language-pair-mark {
+  display: grid;
+  place-items: center;
+  height: 35px;
+  color: var(--accent);
+  font-size: 14px;
+}
 .display-option {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr) 16px;

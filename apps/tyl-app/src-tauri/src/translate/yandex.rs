@@ -10,13 +10,14 @@ const USER_AGENT: &str = "ru.yandex.translate/3.20.2024";
 static UCID: LazyLock<Mutex<Option<(String, Instant)>>> = LazyLock::new(|| Mutex::new(None));
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
-pub async fn translate(text: &str, target: &str) -> Result<String, String> {
-    let direction = if super::auto_target(text) == "en" {
+pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
+    // A target-only direction enables provider-side source detection.
+    let direction = if source == "auto" && contains_han(text) {
         format!("zh-{}", map_language(target))
-    } else {
-        // Yandex rejects "auto-zh" with code 501. A target-only language asks
-        // the service to auto-detect the source.
+    } else if source == "auto" {
         map_language(target).to_string()
+    } else {
+        format!("{}-{}", map_language(source), map_language(target))
     };
     let parts = super::iciba::split_text(text, 7_000);
     let mut translated = Vec::with_capacity(parts.len());
@@ -104,6 +105,12 @@ fn map_language(language: &str) -> &str {
     }
 }
 
+fn contains_han(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(ch, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -117,14 +124,16 @@ mod tests {
     #[tokio::test]
     #[ignore = "Opt-in: sends fixed public fixtures to Yandex"]
     async fn live_auto_direction_and_long_text_smoke() {
-        let short = super::translate("This is a translation test.", "zh-CN")
+        let short = super::translate("This is a translation test.", "auto", "zh-CN")
             .await
             .unwrap();
         assert!(!short.is_empty());
-        let reverse = super::translate("这是一次翻译测试。", "en").await.unwrap();
+        let reverse = super::translate("这是一次翻译测试。", "auto", "en")
+            .await
+            .unwrap();
         assert!(reverse.to_ascii_lowercase().contains("translation"));
         let long = "Every paragraph must remain complete. ".repeat(240) + "Final marker 7391.";
-        let translated = super::translate(&long, "zh-CN").await.unwrap();
+        let translated = super::translate(&long, "auto", "zh-CN").await.unwrap();
         assert!(translated.contains("7391"));
     }
 }

@@ -105,8 +105,10 @@ pub fn run(app: &tauri::AppHandle) -> Result<(), String> {
         app.emit("tyl://captured", CapturedEvent {
             request_id, text: if word { "elegant".into() } else { "A thoughtfully designed tool makes reading easier. Clear hierarchy, comfortable spacing and smooth feedback create a reliable reading experience.".into() },
             source: SourceInfo {kind: "manual", restored: None}, elapsed_ms: 0, target_exe: None,
-            engines: vec!["bing".into()], result_display: "tabs".into(), grow_upward: false,
-            theme: theme.into(), color_scheme: "indigo".into(), show_source: false,
+            engines: vec!["bing".into()], result_display: "tabs".into(),
+            source_language: "auto".into(), detected_source_language: "en".into(),
+            target_language: "zh-CN".into(), translation_revision: 0, grow_upward: false,
+            theme: theme.into(), color_scheme: "indigo".into(), language: "zh-CN".into(), show_source: false,
             is_word: word, dictionary: true, can_replace: false, replace_requires_verification: false, benchmark: true,
         }).map_err(|e| e.to_string())?;
         let text = if word {
@@ -122,6 +124,7 @@ pub fn run(app: &tauri::AppHandle) -> Result<(), String> {
             crate::pipeline::TRANSLATE_EVENT,
             TranslateEvent {
                 request_id,
+                translation_revision: 0,
                 phase: if word { "dict" } else { "done" },
                 text,
                 service: if word { "dict" } else { "bing" }.into(),
