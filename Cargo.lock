@@ -4403,7 +4403,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tyl-app"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "futures-util",
  "hmac",
@@ -4428,7 +4428,7 @@ dependencies = [
 
 [[package]]
 name = "tyl-cli"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "serde_json",
  "tyl-core",
@@ -4437,7 +4437,7 @@ dependencies = [
 
 [[package]]
 name = "tyl-core"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4446,7 +4446,7 @@ dependencies = [
 
 [[package]]
 name = "tyl-platform"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "serde_json",
  "tyl-core",
