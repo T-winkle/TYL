@@ -29,7 +29,7 @@
 </p>
 
 > [!IMPORTANT]
-> 当前公开测试版为 `0.1.0-beta.3`，率先支持 Windows 10 / 11 x64。测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示；请只从本仓库下载并核对 SHA-256。
+> 当前公开测试版为 `0.1.0-beta.4`，率先支持 Windows 10 / 11 x64。测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示；请只从本仓库下载并核对 SHA-256。
 
 ## 为什么是 TYL
 
