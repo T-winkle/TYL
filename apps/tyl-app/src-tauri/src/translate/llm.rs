@@ -299,6 +299,7 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let client_may_close_after_headers = !status.starts_with('2');
         let response = format!("HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         let thread = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
@@ -334,7 +335,20 @@ mod tests {
             assert!(request.contains("\"stream\":true"));
             assert!(!request.contains("temperature"));
             for bytes in response.as_bytes().chunks(11) {
-                socket.write_all(bytes).unwrap();
+                if let Err(error) = socket.write_all(bytes) {
+                    let expected_early_close = client_may_close_after_headers
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        );
+                    assert!(
+                        expected_early_close,
+                        "fixture response write failed: {error}"
+                    );
+                    break;
+                }
             }
         });
         (
