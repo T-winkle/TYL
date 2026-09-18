@@ -4,7 +4,7 @@
 //! UI 线程只做窗口操作和事件推送。
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -109,6 +109,8 @@ pub struct Pipeline {
     capture: Option<crate::platform_capture::CaptureHandle>,
     /// 热键连打防抖：递增的代际号，过期的取词/翻译结果直接丢弃。
     generation: Arc<AtomicU64>,
+    /// 平台取词单飞锁。翻译请求可以并行，但 UIA/剪贴板取词不能重叠。
+    capture_in_flight: AtomicBool,
     /// 共享 tokio runtime（翻译请求）。
     rt: tokio::runtime::Handle,
 }
@@ -118,13 +120,30 @@ impl Pipeline {
         Self {
             capture: crate::platform_capture::spawn_capture(),
             generation: Arc::new(AtomicU64::new(0)),
+            capture_in_flight: AtomicBool::new(false),
             rt: crate::runtime::handle(),
         }
     }
 
     /// 热键回调（global-shortcut 线程）——必须立即返回，工作丢给线程。
     pub fn on_hotkey(app: AppHandle, pipeline: Arc<Pipeline>) {
+        if pipeline
+            .capture_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            crate::logger::trace("取词仍在进行：已忽略重叠请求，避免剪贴板事务冲突");
+            return;
+        }
+
         std::thread::spawn(move || {
+            struct CaptureFlightGuard<'a>(&'a AtomicBool);
+            impl Drop for CaptureFlightGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            let _flight = CaptureFlightGuard(&pipeline.capture_in_flight);
             let gen = pipeline.generation.fetch_add(1, Ordering::SeqCst) + 1;
             crate::desktop_actions::invalidate();
             if let Err(e) = run_capture_and_show(app, &pipeline, gen) {

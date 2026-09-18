@@ -88,6 +88,9 @@ impl WinCapture {
                 match self.uia.capture(anchor, uia_budget) {
                     Ok(t) => return CaptureOutcome::Primary(t),
                     Err(e) => {
+                        clipboard_fallback::trace_log(&format!(
+                            "[uia] 取词失败，准备降级剪贴板: {e}"
+                        ));
                         if matches!(plan, ChannelPlan::UiaOnly) {
                             // Explain *why* we refuse to fall back — in a
                             // terminal the simulated Ctrl+C is a destructive

@@ -4,13 +4,16 @@
 //!
 //! 1. 还欠账 —— 上次还原失败时剪贴板残留的是我们的污染物，必须先
 //!    补还原，否则会把污染物当用户内容快照（滚雪球 bug）。
-//! 2. 快照 —— OleGetClipboard 全格式深拷贝。
-//! 3. 等输入静默 —— 鼠标键释放后选区才确定；热键紧跟松手时注入的
+//! 2. 等输入静默 —— 鼠标键释放后选区才确定；热键紧跟松手时注入的
 //!    Ctrl+C 会与选择余波交错（WPS 两轮写剪贴板）。
-//! 4. 模拟 Ctrl+C —— 先临时抬起按住的修饰键，避免变成 Ctrl+Alt+C。
-//! 5. 读文本 + 打隐身标记 —— "Clipboard Viewer Ignore" 让 Ditto/Win+V
+//! 3. 等冲突修饰键释放 —— 不在 Alt/Shift/Win 仍被按住时注入任何按键，
+//!    避免 Edge 等应用切到菜单或清掉原选区；Ctrl 可直接复用。
+//! 4. 快照 —— 在等待完成后立即用 OleGetClipboard 全格式深拷贝，避免
+//!    用等待前的旧快照覆盖期间发生的合法剪贴板写入。
+//! 5. 模拟 Ctrl+C —— 冲突修饰键已经释放，发送唯一一次干净的 Ctrl+C。
+//! 6. 读文本 + 打隐身标记 —— "Clipboard Viewer Ignore" 让 Ditto/Win+V
 //!    不记录我们取的词。
-//! 6. 还原 —— 内容感知守卫（剪贴板内容仍=本次取词文本才算我们的事）
+//! 7. 还原 —— 内容感知守卫（剪贴板内容仍=本次取词文本才算我们的事）
 //!    + 回读验证。失败记欠账，下次先还。
 
 use std::time::{Duration, Instant};
@@ -31,10 +34,12 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Ole::{OleGetClipboard, ReleaseStgMedium, CF_UNICODETEXT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    VK_CONTROL, VK_INSERT, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    VK_CONTROL, VK_INSERT, VK_LCONTROL, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RWIN, VK_SHIFT,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MODIFIER_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+const MODIFIER_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CLIPBOARD_FORMAT: u32 = CF_UNICODETEXT.0 as u32;
 
 /// 日志钩子：宿主（tyl-app）注入写文件实现；默认 stderr。
@@ -50,6 +55,10 @@ fn log_str(msg: &str) {
         Some(h) => h(msg),
         None => eprintln!("[tyl] {msg}"),
     }
+}
+
+pub(crate) fn trace_log(msg: &str) {
+    log_str(msg);
 }
 
 struct SnapshotEntry {
@@ -68,6 +77,8 @@ pub struct ClipboardFallback {
     /// 还原失败的"欠账"：上一次没还回去的用户快照。存在期间剪贴板
     /// 残留的是我们的污染物，下次取词必须先还账（见模块注释步骤 1）。
     debt: std::sync::Mutex<Option<ClipboardSnapshot>>,
+    /// 剪贴板取词是一个不可重入事务；并发快照/还原会互相覆盖。
+    operation: std::sync::Mutex<()>,
 }
 
 impl ClipboardFallback {
@@ -75,6 +86,7 @@ impl ClipboardFallback {
         Self {
             restore,
             debt: std::sync::Mutex::new(None),
+            operation: std::sync::Mutex::new(()),
         }
     }
 
@@ -107,8 +119,15 @@ impl TextCapture for ClipboardFallback {
         _anchor: &CaptureAnchor,
         deadline: Duration,
     ) -> Result<CapturedText, CaptureError> {
+        let _operation = self.operation.try_lock().map_err(|_| {
+            CaptureError::Channel(
+                "another clipboard capture is already in progress; overlapping request skipped"
+                    .into(),
+            )
+        })?;
         let start = Instant::now();
-        let deadline = start + deadline;
+        let capture_budget = deadline;
+        let input_quiet_deadline = start + capture_budget;
 
         // COM 必须就绪：OleGetClipboard/EnumFormatEtc 要求线程已初始化，
         // 未初始化时格式枚举不完整 → 还原丢格式（真机首发 case）。
@@ -130,7 +149,37 @@ impl TextCapture for ClipboardFallback {
             }
         }
 
-        // ── 2. 快照当前内容（模拟复制之前）─────────────────────────
+        // ── 2. 输入静默门槛 ────────────────────────────────────────
+        wait_mouse_buttons_released(input_quiet_deadline);
+
+        // ── 3. 等待冲突修饰键释放 ──────────────────────────────────
+        // UIA 已经在 Pressed 阶段立即尝试过。剪贴板通道只等待会改变
+        // Ctrl+C 语义的 Alt/Shift/Win；Ctrl 本身可直接复用，因此 Ctrl-only
+        // 快捷键仍可在 Pressed 阶段完成取词。直接读取物理键状态，避免再
+        // 等 global-shortcut 的 Released 通知带来的调度延迟。
+        if conflicting_modifier_down() {
+            log_str("[clip] 等待冲突修饰键真实释放后再复制");
+            let wait_started = Instant::now();
+            let release_deadline = wait_started + MODIFIER_RELEASE_TIMEOUT;
+            while conflicting_modifier_down() && Instant::now() < release_deadline {
+                std::thread::sleep(MODIFIER_POLL_INTERVAL);
+            }
+            if conflicting_modifier_down() {
+                log_str("[clip] 等待冲突修饰键释放超时，未向目标应用注入按键");
+                return Err(CaptureError::NoText(
+                    "a conflicting shortcut modifier remained pressed; clipboard copy was skipped"
+                        .into(),
+                ));
+            }
+            log_str(&format!(
+                "[clip] 冲突修饰键已释放，已等待 {}ms，开始复制",
+                wait_started.elapsed().as_millis()
+            ));
+        }
+
+        // ── 4. 快照当前内容（紧邻模拟复制）─────────────────────────
+        // 必须在等待松键之后快照；否则等待期间的合法剪贴板写入会被旧
+        // 快照覆盖。
         let snapshot = snapshot_via_ole()
             .map_err(|e| CaptureError::Channel(format!("clipboard snapshot failed: {e}")))?;
         log_str(&format!(
@@ -139,15 +188,19 @@ impl TextCapture for ClipboardFallback {
         ));
         let seq0 = unsafe { GetClipboardSequenceNumber() };
 
-        // ── 3. 输入静默门槛 ────────────────────────────────────────
-        wait_mouse_buttons_released(deadline);
+        // ── 5. 模拟唯一一次干净的 Ctrl+C ──────────────────────────
+        if !send_ctrl_c() {
+            return Err(CaptureError::Channel(
+                "failed to inject the copy shortcut".into(),
+            ));
+        }
 
-        // ── 4. 模拟 Ctrl+C ─────────────────────────────────────────
-        send_ctrl_c();
-
-        // ── 5. 读文本 + 隐身标记 ───────────────────────────────────
+        // ── 6. 读文本 + 隐身标记 ───────────────────────────────────
         let mut captured = String::new();
-        while Instant::now() < deadline {
+        // 松键等待不占用目标应用响应预算；复制完成后仍给它完整的正常
+        // 预算，以覆盖 WPS 等应用的多轮剪贴板写入。
+        let response_deadline = Instant::now() + capture_budget.max(Duration::from_millis(500));
+        loop {
             std::thread::sleep(POLL_INTERVAL);
             if unsafe { GetClipboardSequenceNumber() } != seq0 {
                 if let Some(text) = read_clipboard_text() {
@@ -156,6 +209,10 @@ impl TextCapture for ClipboardFallback {
                         break;
                     }
                 }
+            }
+
+            if Instant::now() >= response_deadline {
+                break;
             }
         }
 
@@ -173,10 +230,10 @@ impl TextCapture for ClipboardFallback {
         }
 
         // 隐身标记本身会 bump seq，所以之后不能再用 seq 判断"谁动过
-        // 剪贴板"——还原守卫改用内容感知（见步骤 6）。
+        // 剪贴板"——还原守卫改用内容感知（见步骤 7）。
         mark_clipboard_ignore();
 
-        // ── 6. 还原 ────────────────────────────────────────────────
+        // ── 7. 还原 ────────────────────────────────────────────────
         let restored = self.restore && {
             // 内容感知守卫：剪贴板当前文本仍 == 本次取词文本，说明期间
             // 的额外写入都是目标应用补完自己的复制（我们的连锁，非第三
@@ -237,14 +294,17 @@ fn ensure_com_on_this_thread() {
     });
 }
 
-/// 物理修饰键（热键触发时用户手指可能还没松开）。
-const MODIFIER_VKS: [VIRTUAL_KEY; 5] = [
-    VK_CONTROL, VK_MENU, // Alt
-    VK_SHIFT, VK_LWIN, VK_RWIN,
-];
+/// 会改变 Ctrl+C/Ctrl+Insert 含义的物理修饰键。
+///
+/// Ctrl 单独处理：用户已经按住 Ctrl 时直接复用，不先释放再重新注入。
+const CONFLICTING_MODIFIER_VKS: [VIRTUAL_KEY; 4] = [VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN];
 
 fn key_down(vk: VIRTUAL_KEY) -> bool {
     (unsafe { GetAsyncKeyState(vk.0 as i32) } as u16) & 0x8000 != 0
+}
+
+fn conflicting_modifier_down() -> bool {
+    CONFLICTING_MODIFIER_VKS.iter().copied().any(key_down)
 }
 
 /// 等待物理鼠标按键全部释放（选区确定），上限 150ms。
@@ -265,8 +325,49 @@ fn wait_mouse_buttons_released(deadline: Instant) {
     // 超时（用户长按拖选？）也继续——取词比等待更重要，还原尽力而为。
 }
 
-fn send_ctrl_c() {
-    let _ = send_copy_shortcut(VIRTUAL_KEY(0x43));
+fn send_ctrl_c() -> bool {
+    send_copy_shortcut(VIRTUAL_KEY(0x43))
+}
+
+#[derive(Clone, Copy)]
+struct KeyStroke {
+    key: VIRTUAL_KEY,
+    up: bool,
+}
+
+fn copy_key_strokes(
+    copy_key: VIRTUAL_KEY,
+    physical_ctrl: bool,
+    physical_copy_key: bool,
+) -> Vec<KeyStroke> {
+    let mut strokes = Vec::with_capacity(5);
+    if physical_copy_key {
+        strokes.push(KeyStroke {
+            key: copy_key,
+            up: true,
+        });
+    }
+    if !physical_ctrl {
+        strokes.push(KeyStroke {
+            key: VK_CONTROL,
+            up: false,
+        });
+    }
+    strokes.push(KeyStroke {
+        key: copy_key,
+        up: false,
+    });
+    strokes.push(KeyStroke {
+        key: copy_key,
+        up: true,
+    });
+    if !physical_ctrl {
+        strokes.push(KeyStroke {
+            key: VK_CONTROL,
+            up: true,
+        });
+    }
+    strokes
 }
 
 fn send_copy_shortcut(copy_key: VIRTUAL_KEY) -> bool {
@@ -287,32 +388,39 @@ fn send_copy_shortcut(copy_key: VIRTUAL_KEY) -> bool {
         },
     };
 
-    // 热键（如 Alt+T）触发时修饰键很可能还物理按着；直接叠 Ctrl+C 会
-    // 变成 Ctrl+Alt+C（Edge/WPS 里不是复制）。协议：临时抬起 → 干净的
-    // Ctrl+C → 恢复原按键状态（手指还没松就保持原状）。
-    let held: Vec<VIRTUAL_KEY> = MODIFIER_VKS
-        .iter()
-        .copied()
-        .filter(|vk| key_down(*vk))
-        .collect();
+    // 永不合成 Alt/Shift/Win KeyUp：Edge 等应用可能因此激活菜单、移动
+    // 焦点或清空原选区。取词入口已经等待这些按键真实释放；这里再次
+    // 检查是为了封住检测与 SendInput 之间极短的竞态窗口。
+    if conflicting_modifier_down() {
+        log_str("[clip] 注入前检测到冲突修饰键，已安全取消复制");
+        return false;
+    }
+    let physical_ctrl = key_down(VK_CONTROL) || key_down(VK_LCONTROL) || key_down(VK_RCONTROL);
+    let physical_copy_key = key_down(copy_key);
 
-    let mut seq: Vec<INPUT> = Vec::with_capacity(8 + held.len() * 2);
-    for vk in &held {
-        seq.push(mk(*vk, true));
-    }
-    seq.extend_from_slice(&[
-        mk(VK_CONTROL, false),
-        mk(copy_key, false),
-        mk(copy_key, true),
-        mk(VK_CONTROL, true),
-    ]);
-    for vk in &held {
-        seq.push(mk(*vk, false));
-    }
+    // A user-configured hotkey may itself contain C/Insert. Normalize that key
+    // before emitting a fresh copy chord, again without synthesizing it back.
+    let strokes = copy_key_strokes(copy_key, physical_ctrl, physical_copy_key);
+    let seq: Vec<INPUT> = strokes
+        .iter()
+        .map(|stroke| mk(stroke.key, stroke.up))
+        .collect();
+    log_str(&format!(
+        "[clip] 注入复制: key={} Ctrl={}",
+        if copy_key == VK_INSERT { "Insert" } else { "C" },
+        if physical_ctrl {
+            "复用物理按键"
+        } else {
+            "合成"
+        }
+    ));
     unsafe {
         let sent = SendInput(&seq, std::mem::size_of::<INPUT>() as i32);
         if sent != seq.len() as u32 {
-            let releases = [mk(copy_key, true), mk(VK_CONTROL, true)];
+            let mut releases = vec![mk(copy_key, true)];
+            if !physical_ctrl {
+                releases.push(mk(VK_CONTROL, true));
+            }
             SendInput(&releases, std::mem::size_of::<INPUT>() as i32);
             return false;
         }
@@ -817,8 +925,9 @@ fn bytes_to_hglobal(bytes: &[u8]) -> Option<HGLOBAL> {
 }
 
 #[cfg(test)]
-mod replacement_tests {
-    use super::clipboard_text_matches;
+mod tests {
+    use super::{clipboard_text_matches, copy_key_strokes};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_CONTROL};
 
     #[test]
     fn replacement_validation_only_normalizes_line_endings() {
@@ -826,5 +935,32 @@ mod replacement_tests {
         assert!(clipboard_text_matches("a\rb", "a\nb"));
         assert!(!clipboard_text_matches("a b", "a  b"));
         assert!(!clipboard_text_matches("a\n", "a"));
+    }
+
+    #[test]
+    fn copy_sequence_synthesizes_a_clean_control_chord() {
+        let copy_key = VIRTUAL_KEY(0x43);
+        let strokes = copy_key_strokes(copy_key, false, false);
+        let actual: Vec<(u16, bool)> = strokes.iter().map(|s| (s.key.0, s.up)).collect();
+
+        assert_eq!(
+            actual,
+            vec![
+                (VK_CONTROL.0, false),
+                (copy_key.0, false),
+                (copy_key.0, true),
+                (VK_CONTROL.0, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_sequence_reuses_a_physically_held_control_key() {
+        let copy_key = VIRTUAL_KEY(0x43);
+        let strokes = copy_key_strokes(copy_key, true, false);
+        let actual: Vec<(u16, bool)> = strokes.iter().map(|s| (s.key.0, s.up)).collect();
+
+        assert_eq!(actual, vec![(copy_key.0, false), (copy_key.0, true)]);
+        assert!(!actual.iter().any(|(key, _)| *key == VK_CONTROL.0));
     }
 }

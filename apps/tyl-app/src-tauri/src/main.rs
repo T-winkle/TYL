@@ -22,7 +22,7 @@ mod visual_bench;
 mod webview_memory;
 mod window_ctl;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::tray::TrayIconBuilder;
@@ -31,6 +31,31 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 /// 前端就绪标志（就绪前管线不推送事件，避免丢首批取词）。
 pub struct ReadyFlag(pub AtomicBool);
+
+/// One physical hotkey gesture must produce at most one capture request.
+///
+/// Windows emits repeated `WM_HOTKEY` messages while the shortcut is held.
+/// `tauri-plugin-global-shortcut` exposes each one as `Pressed`, so treating
+/// every callback as a new gesture starts overlapping clipboard transactions.
+/// The matching `Released` event is used only to re-arm the next gesture.
+#[derive(Default)]
+struct HotkeyGestureGate {
+    pressed: AtomicBool,
+}
+
+impl HotkeyGestureGate {
+    /// Returns true only for the first `Pressed` event in a gesture.
+    fn begin_press(&self) -> bool {
+        self.pressed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Returns true when this event actually re-armed a pressed gesture.
+    fn release(&self) -> bool {
+        self.pressed.swap(false, Ordering::AcqRel)
+    }
+}
 
 fn main() {
     // Load the logging threshold before producing startup diagnostics (Off too).
@@ -157,15 +182,16 @@ fn main() {
                 // 全局热键（设置里的值）→ 管线。
                 let hotkey_app = app.handle().clone();
                 let hotkey_pipeline = Arc::clone(&pipeline);
+                let hotkey_gesture = Arc::new(HotkeyGestureGate::default());
                 app.global_shortcut().on_shortcut(
                     settings::current().hotkey.as_str(),
-                    move |_app, _sc, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            if !hotkey_app
-                                .state::<ReadyFlag>()
-                                .0
-                                .load(std::sync::atomic::Ordering::SeqCst)
-                            {
+                    move |_app, _sc, event| match event.state() {
+                        ShortcutState::Pressed => {
+                            if !hotkey_gesture.begin_press() {
+                                logger::trace("热键仍处于按下状态：已忽略系统自动重复");
+                                return;
+                            }
+                            if !hotkey_app.state::<ReadyFlag>().0.load(Ordering::SeqCst) {
                                 logger::log_str("热键触发，但前端尚未就绪；已跳过本次取词");
                                 return;
                             }
@@ -174,6 +200,11 @@ fn main() {
                                 hotkey_app.clone(),
                                 Arc::clone(&hotkey_pipeline),
                             );
+                        }
+                        ShortcutState::Released => {
+                            if hotkey_gesture.release() {
+                                logger::trace("热键已释放：下一次取词已重新启用");
+                            }
                         }
                     },
                 )?;
@@ -254,4 +285,21 @@ pub(crate) fn refresh_tray_i18n(app: &tauri::AppHandle) {
         "TYL 划词翻译（右键菜单）",
         "TYL Selection Translator (right-click for menu)",
     )));
+}
+
+#[cfg(test)]
+mod hotkey_tests {
+    use super::HotkeyGestureGate;
+
+    #[test]
+    fn one_capture_is_admitted_per_physical_gesture() {
+        let gate = HotkeyGestureGate::default();
+
+        assert!(gate.begin_press());
+        assert!(!gate.begin_press());
+        assert!(!gate.begin_press());
+        assert!(gate.release());
+        assert!(!gate.release());
+        assert!(gate.begin_press());
+    }
 }
