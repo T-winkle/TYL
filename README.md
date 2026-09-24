@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/T-winkle/TYL/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/T-winkle/TYL/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Windows 10 / 11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-4f64ad?logo=windows11&logoColor=white">
-  <img alt="Release beta" src="https://img.shields.io/badge/release-0.1.0--beta.1-4f64ad">
+  <img alt="Release beta" src="https://img.shields.io/badge/release-0.1.0--beta.5-4f64ad">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-263238"></a>
 </p>
 
@@ -138,5 +138,13 @@ apps/tyl-app/
 - 当前只正式支持 Windows 10 / 11 x64。
 - 自绘编辑器应用暴露的 UIA 能力因版本而异；无法安全确认选区时，替换功能会拒绝执行，但复制译文仍然可用。
 - 尚未提供自动更新。
+
+## 致谢
+
+TYL 在调研和实现过程中参考并受益于以下优秀的开源项目：
+
+- [STranslate](https://github.com/STranslate/STranslate)：Windows 划词翻译、翻译服务接入与兼容性处理。
+- [Pot](https://github.com/pot-app/pot-desktop)：跨平台划词翻译、多引擎组织与产品交互设计。
+- [selection-hook](https://github.com/0xfullex/selection-hook)：跨应用选区读取、Windows UI Automation 与剪贴板恢复思路。
 
 

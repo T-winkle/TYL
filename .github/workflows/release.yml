@@ -118,17 +118,44 @@ jobs:
           }
           Set-Content -LiteralPath $releaseNotesPath -Value $releaseNotes -Encoding utf8NoBOM
 
-          $arguments = @(
-            'release', 'create', $env:GITHUB_REF_NAME
-          ) + $assets + @(
-            '--verify-tag',
-            '--title', "TYL $version",
-            '--notes-file', $releaseNotesPath
-          )
-          if ($version.Contains('-')) {
-            $arguments += '--prerelease'
-          }
-          & gh @arguments
-          if ($LASTEXITCODE -ne 0) {
-            throw "GitHub Release creation failed with exit code $LASTEXITCODE."
+          & gh release view $env:GITHUB_REF_NAME --json tagName *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+
+          if ($releaseExists) {
+            Write-Host "Release $env:GITHUB_REF_NAME already exists; updating it in place."
+            $editArguments = @(
+              'release', 'edit', $env:GITHUB_REF_NAME,
+              '--title', "TYL $version",
+              '--notes-file', $releaseNotesPath
+            )
+            if ($version.Contains('-')) {
+              $editArguments += '--prerelease'
+            }
+            & gh @editArguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release update failed with exit code $LASTEXITCODE."
+            }
+
+            $uploadArguments = @(
+              'release', 'upload', $env:GITHUB_REF_NAME
+            ) + $assets + @('--clobber')
+            & gh @uploadArguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release asset replacement failed with exit code $LASTEXITCODE."
+            }
+          } else {
+            $createArguments = @(
+              'release', 'create', $env:GITHUB_REF_NAME
+            ) + $assets + @(
+              '--verify-tag',
+              '--title', "TYL $version",
+              '--notes-file', $releaseNotesPath
+            )
+            if ($version.Contains('-')) {
+              $createArguments += '--prerelease'
+            }
+            & gh @createArguments
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release creation failed with exit code $LASTEXITCODE."
+            }
           }

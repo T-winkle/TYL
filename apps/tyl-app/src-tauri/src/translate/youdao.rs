@@ -5,7 +5,8 @@
 //!   t    = 时间戳ms + len(q+"webfanyi.webmain")%10
 //!   SECRET = "t2he2k4m2g6QKRigK0KAmSpXKgAezywG"（web 前端公开常量）
 //!
-//! 数据质量：翻译 auto 检测双向；词典含 us/uk 音标、词性释义、
+//! 数据质量：免 Key 网页接口只可靠支持中英双向（会忽略其他 `to` 值）；
+//! 词典含 us/uk 音标、词性释义、
 //! 单词变形（三单/过去式）、考试标签（CET4/6/考研）。老接口
 //! fanyi.youdao.com/translate_o（fanyidesk2 签名）已失效（errorCode 30）。
 
@@ -101,6 +102,53 @@ fn map_target(target: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YoudaoDirection {
+    ChineseToEnglish,
+    EnglishToChinese,
+}
+
+impl YoudaoDirection {
+    fn response_type(self) -> &'static str {
+        match self {
+            Self::ChineseToEnglish => "zh-CHS2en",
+            Self::EnglishToChinese => "en2zh-CHS",
+        }
+    }
+}
+
+const UNSUPPORTED_LANGUAGE_PAIR: &str =
+    "unsupported language pair: Youdao keyless service supports only Chinese and English";
+
+fn resolve_direction(text: &str, source: &str, target: &str) -> Result<YoudaoDirection, String> {
+    let effective_source = if source == "auto" {
+        super::detect_language(text)
+            .or_else(|| {
+                // Very short English words are intentionally below the generic
+                // detector's confidence threshold, but they are the keyless
+                // dictionary endpoint's most reliable input.
+                let trimmed = text.trim();
+                (!trimmed.is_empty()
+                    && trimmed.chars().any(|ch| ch.is_ascii_alphabetic())
+                    && trimmed
+                        .chars()
+                        .all(|ch| ch.is_ascii() && !ch.is_ascii_control()))
+                .then(|| "en".to_string())
+            })
+            .unwrap_or_else(|| "auto".into())
+    } else {
+        source.to_string()
+    };
+
+    if effective_source.starts_with("zh-") && target == "en" {
+        Ok(YoudaoDirection::ChineseToEnglish)
+    } else if effective_source == "en" && target == "zh-CN" {
+        Ok(YoudaoDirection::EnglishToChinese)
+    } else {
+        Err(UNSUPPORTED_LANGUAGE_PAIR.into())
+    }
+}
+
 fn sign(q: &str) -> (String, String) {
     let t = format!(
         "{}{}",
@@ -118,13 +166,14 @@ fn sign(q: &str) -> (String, String) {
 /// jsonapi_s silently truncates long queries (observed around 600 units).
 /// Stay below that limit, preserve every source byte and keep request order.
 pub async fn translate(text: &str, source: &str, target: &str) -> Result<String, String> {
+    let direction = resolve_direction(text, source, target)?;
     let parts = split_query(text, 400);
     let translated: Vec<String> = stream::iter(parts.iter().copied())
         .map(|part| async move {
             if part.trim().is_empty() {
                 return Ok(String::new());
             }
-            translate_part(part.trim(), source, target).await
+            translate_part(part.trim(), source, target, direction).await
         })
         .buffered(3)
         .try_collect()
@@ -198,7 +247,12 @@ fn is_cjk(ch: char) -> bool {
     matches!(ch, '\u{2e80}'..='\u{9fff}' | '\u{f900}'..='\u{faff}' | '\u{ff00}'..='\u{ffef}')
 }
 
-async fn translate_part(text: &str, source: &str, target: &str) -> Result<String, String> {
+async fn translate_part(
+    text: &str,
+    source: &str,
+    target: &str,
+    direction: YoudaoDirection,
+) -> Result<String, String> {
     let (sgn, t) = sign(text);
     let client = super::client();
     let resp = client
@@ -221,10 +275,10 @@ async fn translate_part(text: &str, source: &str, target: &str) -> Result<String
         return Err(format!("http {}", resp.status()));
     }
     let v: Value = resp.json().await.map_err(|e| format!("json: {e}"))?;
-    parse_part(&v, text)
+    parse_part(&v, text, direction)
 }
 
-fn parse_part(v: &Value, text: &str) -> Result<String, String> {
+fn parse_part(v: &Value, text: &str, direction: YoudaoDirection) -> Result<String, String> {
     if let Some(input) = v.pointer("/fanyi/input").and_then(Value::as_str) {
         if input.replace("\r\n", "\n").trim() != text.replace("\r\n", "\n").trim() {
             crate::logger::warn(&format!(
@@ -233,6 +287,17 @@ fn parse_part(v: &Value, text: &str) -> Result<String, String> {
                 input.chars().count()
             ));
             return Err("有道未完整接收原文，请重新划词或切换引擎".into());
+        }
+    }
+    if let Some(actual) = v.pointer("/fanyi/type").and_then(Value::as_str) {
+        let expected = direction.response_type();
+        if !actual.eq_ignore_ascii_case(expected) {
+            crate::logger::warn(&format!(
+                "[youdao] 返回语言方向不一致: expected={expected} actual={actual}"
+            ));
+            return Err(
+                "Youdao returned a different language direction; try another engine".into(),
+            );
         }
     }
     parse_translation(v)
@@ -340,10 +405,64 @@ mod tests {
     #[test]
     fn refuses_silently_truncated_source_echo() {
         let response = serde_json::json!({"fanyi":{"input":"First sentence.","tran":"第一句。"}});
-        assert!(parse_part(&response, "First sentence. Final sentence.").is_err());
+        assert!(parse_part(
+            &response,
+            "First sentence. Final sentence.",
+            YoudaoDirection::EnglishToChinese
+        )
+        .is_err());
         assert_eq!(
-            parse_part(&response, "First sentence.").unwrap(),
+            parse_part(
+                &response,
+                "First sentence.",
+                YoudaoDirection::EnglishToChinese
+            )
+            .unwrap(),
             "第一句。"
+        );
+    }
+
+    #[test]
+    fn keyless_service_accepts_only_chinese_english_pairs() {
+        assert_eq!(
+            resolve_direction("这是中文。", "auto", "en").unwrap(),
+            YoudaoDirection::ChineseToEnglish
+        );
+        assert_eq!(
+            resolve_direction("This is English.", "auto", "zh-CN").unwrap(),
+            YoudaoDirection::EnglishToChinese
+        );
+        assert_eq!(
+            resolve_direction("hello", "auto", "zh-CN").unwrap(),
+            YoudaoDirection::EnglishToChinese
+        );
+        for (text, source, target) in [
+            ("这是中文。", "auto", "ja"),
+            ("这是中文。", "zh-CN", "fr"),
+            ("This is English.", "en", "de"),
+            ("これは日本語です。", "auto", "zh-CN"),
+            ("這是繁體中文。", "zh-TW", "zh-CN"),
+        ] {
+            assert_eq!(
+                resolve_direction(text, source, target).unwrap_err(),
+                UNSUPPORTED_LANGUAGE_PAIR
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_response_in_a_different_language_direction() {
+        let response = serde_json::json!({
+            "fanyi": {
+                "input": "这是中文。",
+                "type": "zh-CHS2en",
+                "tran": "This is Chinese."
+            }
+        });
+        assert!(parse_part(&response, "这是中文。", YoudaoDirection::EnglishToChinese).is_err());
+        assert_eq!(
+            parse_part(&response, "这是中文。", YoudaoDirection::ChineseToEnglish).unwrap(),
+            "This is Chinese."
         );
     }
 

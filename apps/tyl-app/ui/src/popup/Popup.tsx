@@ -1054,6 +1054,18 @@ function statusLabel(status?: EngineState["status"]) {
         : tr("正在翻译", "Translating");
 }
 function friendlyError(error = "") {
+  if (/unsupported language pair.*youdao/i.test(error)) {
+    return tr(
+      "有道免 Key 接口仅支持中英互译，请切换其他引擎",
+      "The keyless Youdao service only supports Chinese ↔ English. Try another engine.",
+    );
+  }
+  if (/Youdao returned a different language direction/i.test(error)) {
+    return tr(
+      "有道返回了错误的语言方向，请切换其他引擎",
+      "Youdao returned the wrong language direction. Try another engine.",
+    );
+  }
   if (error.startsWith("AI ")) {
     return /API Key|API key/.test(error)
       ? tr("请先配置 AI 密钥", "Configure an AI API key first")
