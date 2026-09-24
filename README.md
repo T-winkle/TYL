@@ -147,4 +147,6 @@ TYL 在调研和实现过程中参考并受益于以下优秀的开源项目：
 - [Pot](https://github.com/pot-app/pot-desktop)：跨平台划词翻译、多引擎组织与产品交互设计。
 - [selection-hook](https://github.com/0xfullex/selection-hook)：跨应用选区读取、Windows UI Automation 与剪贴板恢复思路。
 
+### 社区支持
 
+感谢 [LINUX DO](https://linux.do/) 社区为独立开发者提供开放、真诚的交流与分享空间。
