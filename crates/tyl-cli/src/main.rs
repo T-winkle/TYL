@@ -61,11 +61,13 @@ fn cmd_anchor() -> i32 {
 /// Verifies the DPI-awareness fix ran (monitors report real resolution, not
 /// 96-DPI virtualized values) and prints environment diagnostics.
 fn cmd_selfcheck() -> i32 {
+    #[cfg(target_os = "windows")]
     tyl_platform::backend::enable_dpi_awareness();
-    let monitors = <tyl_platform::backend::WinLocator as Default>::default().monitors();
-    let suspicious = monitors
-        .iter()
-        .any(|m| (m.rect.right - m.rect.left) % 96 != 0 && m.scale == 1.0 && m.rect.right > 0);
+    let monitors = <tyl_platform::Locator as Default>::default().monitors();
+    let suspicious = cfg!(target_os = "windows")
+        && monitors
+            .iter()
+            .any(|m| (m.rect.right - m.rect.left) % 96 != 0 && m.scale == 1.0 && m.rect.right > 0);
     println!(
         "{}",
         json!({
@@ -81,13 +83,15 @@ fn cmd_selfcheck() -> i32 {
 }
 
 fn cmd_monitors() -> i32 {
+    #[cfg(target_os = "windows")]
     tyl_platform::backend::enable_dpi_awareness();
-    let monitors = <tyl_platform::backend::WinLocator as Default>::default().monitors();
+    let monitors = <tyl_platform::Locator as Default>::default().monitors();
     println!("{}", json!({ "monitors": monitors }));
     0
 }
 
 fn cmd_capture(args: &[String]) -> i32 {
+    #[cfg(target_os = "windows")]
     tyl_platform::backend::enable_dpi_awareness();
     let mut json_out = false;
     let mut timeout = 800u64;
@@ -135,7 +139,7 @@ fn cmd_capture(args: &[String]) -> i32 {
         eprintln!("\r# capturing…                                        ");
     }
 
-    let capture = tyl_platform::backend::WinCapture::with_policy_and_restore(policy, restore);
+    let capture = tyl_platform::Capture::with_policy_and_restore(policy, restore);
     let anchor = tyl_platform::backend::capture_anchor();
     // Target diagnostics on stderr so `--json` stdout stays parseable.
     eprintln!(
@@ -144,7 +148,16 @@ fn cmd_capture(args: &[String]) -> i32 {
         anchor.cursor
     );
     match capture.capture_detailed(&anchor, Duration::from_millis(timeout)) {
-        CaptureOutcome::Primary(t) => report(&t, "primary(uia)", json_out, verbose),
+        CaptureOutcome::Primary(t) => report(
+            &t,
+            if cfg!(target_os = "macos") {
+                "primary(ax)"
+            } else {
+                "primary(uia)"
+            },
+            json_out,
+            verbose,
+        ),
         CaptureOutcome::Fallback(t) => report(&t, "fallback(clipboard)", json_out, verbose),
         CaptureOutcome::Failed(e) => {
             // Both streams: JSON parsers read stdout, humans read stderr.

@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 /// foreground state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureAnchor {
-    /// Physical-pixel cursor position, if retrievable.
+    /// Cursor position in desktop coordinates, if retrievable.
     pub cursor: Option<crate::locator::Point>,
-    /// Foreground window process name (lowercased, extension stripped),
-    /// e.g. `firefox`. Used to consult the per-app policy table.
+    /// Foreground process name on Windows or bundle identifier on macOS.
     pub target_exe: Option<String>,
 }
 
@@ -26,7 +25,8 @@ pub struct CaptureAnchor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureSource {
-    /// Accessibility API (UIAutomation TextPattern) — zero clipboard access.
+    /// Native accessibility API (UI Automation on Windows or AX on macOS).
+    /// Keeps the existing `uia` wire name for direct capture.
     Uia,
     /// Simulated copy with full snapshot/restore. `restored` is false when
     /// restoration was skipped (third-party wrote the clipboard in between,
@@ -55,7 +55,7 @@ pub struct CapturedText {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<Vec<i32>>,
     pub source: CaptureSource,
-    /// Selection rectangle in physical pixels (first visible line), used to
+    /// Selection rectangle in desktop coordinates, used to
     /// position the popup. `None` when the channel can't provide one.
     pub selection_rect: Option<crate::locator::Rect>,
     /// Time spent inside the capture backend (excluding anchor snapshot).
@@ -72,6 +72,9 @@ impl CapturedText {
 /// Capture failure modes. Ordered from most to least actionable.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
+    /// The operating system requires the user to grant access to selected text.
+    #[error("accessibility permission denied")]
+    PermissionDenied,
     /// The policy table (or user setting) forbids the fallback channel for
     /// this app — e.g. conhost, where a simulated Ctrl+C is SIGINT.
     #[error("fallback channel disabled for this app ({0})")]

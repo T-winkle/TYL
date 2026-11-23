@@ -625,6 +625,29 @@ body {
   color: var(--fg-tertiary);
   font-size: 11px;
 }
+.capture-permission {
+  padding: 6px 17px 14px;
+  overflow-y: auto;
+}
+.capture-permission p {
+  margin: 0 0 10px;
+}
+.capture-permission button {
+  border: 1px solid var(--divider);
+  border-radius: 7px;
+  padding: 5px 10px;
+  background: var(--panel-soft);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.capture-permission button:hover {
+  border-color: var(--accent);
+}
+.capture-permission [role="alert"] {
+  display: block;
+  color: var(--error);
+}
 .partial-error {
   margin-top: 10px;
   font-size: 11px;

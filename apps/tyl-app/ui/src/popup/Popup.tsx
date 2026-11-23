@@ -13,6 +13,7 @@ import { Icon } from "../shared/Icon";
 import { Logo } from "../shared/Logo";
 import { applyTheme, type ColorScheme, type Theme } from "../shared/theme";
 import { installContextMenuGuard } from "../shared/contextMenu";
+import { isMac } from "../shared/platform";
 import {
   applyLanguage,
   localizedError,
@@ -575,6 +576,23 @@ export function Popup() {
         setVisible(false);
       }),
     );
+    if (isMac) {
+      unlisteners.push(await listen<Pick<CapturedPayload, "language" | "theme" | "color_scheme">>(
+        "tyl://capture-permission-required",
+        ({ payload }) => {
+          stopAudio();
+          window.clearTimeout(noticeTimer);
+          window.cancelAnimationFrame(enterFrame);
+          setNotice("");
+          setDirectionOpen(false);
+          applyLanguage(payload.language);
+          document.title = tr("TYL 划词翻译", "TYL Selection Translator");
+          applyTheme(payload.theme, payload.color_scheme);
+          setCaptured(null);
+          setVisible(true);
+        },
+      ));
+    }
     await invoke("frontend_ready");
   });
   onCleanup(() => {
@@ -586,7 +604,29 @@ export function Popup() {
     window.cancelAnimationFrame(fitFrame);
   });
   return (
-    <Show when={visible() && captured()}>
+    <Show when={visible() && captured()} fallback={
+      <Show when={isMac && visible()}>
+        <div class="popup entered">
+          <header class="bar" onPointerDown={beginDrag}>
+            <span class="brand"><Logo /> TYL</span>
+            <span class="brand-label">{tr("划词翻译", "Selection Translator")}</span>
+            <button class="icon-button close" onClick={() => void hide()} aria-label={tr("关闭", "Close")}>
+              <Icon name="close" size={15} />
+            </button>
+          </header>
+          <div class="capture-permission">
+            <p>{tr("允许 TYL 使用辅助功能读取选区，然后再次按划词快捷键。", "Allow TYL to read selected text using Accessibility, then press your shortcut again.")}</p>
+            <button type="button" onClick={() => {
+              void invoke("open_accessibility_settings").catch((error) =>
+                feedback(localizedError(error, "Could not open Accessibility settings"), true));
+            }}>
+              {tr("打开辅助功能设置", "Open Accessibility Settings")}
+            </button>
+            <Show when={notice()}><span role="alert">{notice()}</span></Show>
+          </div>
+        </div>
+      </Show>
+    }>
       <div class="popup" classList={{ entered: entered() }} ref={popupEl}>
         <header class="bar" onPointerDown={beginDrag} title={tr("拖动此处移动窗口", "Drag here to move the window")}>
           <span class="brand" title={captureDescription(captured()!)}>
@@ -987,7 +1027,7 @@ function ResultActions(props: {
     <div class="result-actions" aria-label={tr("结果操作", "Result actions")}>
       <button
         class="icon-button"
-        title={tr("复制当前结果 · Ctrl+C", "Copy current result · Ctrl+C")}
+        title={`${tr("复制当前结果", "Copy current result")} · ${isMac ? "⌘C" : "Ctrl+C"}`}
         aria-label={tr("复制当前结果", "Copy current result")}
         disabled={!props.text}
         onClick={() => void props.onCopy(props.text)}

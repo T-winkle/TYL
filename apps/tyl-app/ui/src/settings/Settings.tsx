@@ -12,6 +12,7 @@ import { Icon, type IconName } from "../shared/Icon";
 import { Logo } from "../shared/Logo";
 import { applyTheme, type ColorScheme, type Theme } from "../shared/theme";
 import { installContextMenuGuard } from "../shared/contextMenu";
+import { isMac } from "../shared/platform";
 import {
   applyLanguage,
   localizedError,
@@ -68,6 +69,11 @@ interface GpuStatus {
   external_override: boolean;
 }
 
+interface MacCaptureStatus {
+  registered: boolean;
+  accessibility: boolean;
+}
+
 type Tab = "general" | "translate" | "network" | "llm";
 
 /** 引擎元数据（标签+说明）。顺序即追加时的展示顺序。 */
@@ -107,9 +113,9 @@ function formatHotkey(value: string) {
   const names: Record<string, string> = {
     ctrl: "Ctrl",
     control: "Ctrl",
-    alt: "Alt",
+    alt: isMac ? "Option" : "Alt",
     shift: "Shift",
-    meta: "Win",
+    meta: isMac ? "Command" : "Win",
   };
   return value
     .split("+")
@@ -152,6 +158,7 @@ export function Settings() {
   const [saved, setSaved] = createSignal("");
   const [saving, setSaving] = createSignal(false);
   const [gpuStatus, setGpuStatus] = createSignal<GpuStatus | null>(null);
+  const [macCaptureStatus, setMacCaptureStatus] = createSignal<MacCaptureStatus>();
   const [savedGpu, setSavedGpu] = createSignal(false);
   const [testingLlm, setTestingLlm] = createSignal(false);
   const [showApiKey, setShowApiKey] = createSignal(false);
@@ -174,6 +181,14 @@ export function Settings() {
   };
   let removeRecording: (() => void) | undefined;
   const dirty = () => Boolean(s()) && JSON.stringify(s()) !== saved();
+  const refreshMacCaptureStatus = async () => {
+    if (!isMac) return;
+    try {
+      setMacCaptureStatus(await invoke<MacCaptureStatus>("mac_capture_status"));
+    } catch (e) {
+      showError(localizedError(e, "Could not check capture status"));
+    }
+  };
   const beginWindowDrag = (event: PointerEvent) => {
     if (event.button !== 0) return;
     const target = event.target;
@@ -197,10 +212,12 @@ export function Settings() {
     removeContextMenu();
     removeWindowDrag();
     removeRecording?.();
+    if (isMac) window.removeEventListener("focus", refreshMacCaptureStatus);
   });
 
   onMount(async () => {
     removeContextMenu = installContextMenuGuard();
+    if (isMac) window.addEventListener("focus", refreshMacCaptureStatus);
     const cancelDrag = () => {
       dragOrigin = undefined;
     };
@@ -234,8 +251,9 @@ export function Settings() {
       setS(initial);
       setSaved(JSON.stringify(initial));
       setSavedGpu(initial.gpu_acceleration ?? false);
-      setGpuStatus(await invoke<GpuStatus>("get_gpu_status"));
+      if (!isMac) setGpuStatus(await invoke<GpuStatus>("get_gpu_status"));
       setAutostart(await invoke<boolean>("get_autostart"));
+      await refreshMacCaptureStatus();
     } catch (e) {
       showError(localizedError(e, "Could not load settings"));
     }
@@ -357,6 +375,7 @@ export function Settings() {
       flashStatus(restartRequired()
         ? tr("已保存，重启后切换渲染模式", "Saved. Restart TYL to change rendering mode")
         : tr("设置已保存", "Settings saved"));
+      await refreshMacCaptureStatus();
     } catch (e) {
       showError(localizedError(e, "Could not save settings"));
     } finally {
@@ -371,7 +390,8 @@ export function Settings() {
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      const k = e.key;
+      const physicalKey = isMac ? /^(?:Key|Digit)([A-Z0-9])$/.exec(e.code)?.[1] : undefined;
+      const k = physicalKey ?? e.key;
       if (k === "Escape") {
         cancelRecord();
         return;
@@ -385,7 +405,9 @@ export function Settings() {
       const key = /^[a-z0-9]$/i.test(k) ? k.toLowerCase() : k;
       if (/^[a-z0-9]$/.test(key) || /^F\d{1,2}$/.test(key)) {
         if (mods.length === 0 && /^[a-z]$/.test(key)) {
-          showError(tr("请加至少一个修饰键（Ctrl/Alt/Shift）", "Add at least one modifier (Ctrl/Alt/Shift)"));
+          showError(isMac
+            ? tr("请加至少一个修饰键", "Add at least one modifier")
+            : tr("请加至少一个修饰键（Ctrl/Alt/Shift）", "Add at least one modifier (Ctrl/Alt/Shift)"));
           return;
         }
         patch({ hotkey: [...mods, key].join("+") });
@@ -514,6 +536,22 @@ export function Settings() {
               <Show when={statusError()}>
                 <div class="settings-message" role="alert">{status()}</div>
               </Show>
+              <Show when={macCaptureStatus()?.accessibility === false}>
+                <div class="settings-message capture-permission" role="status">
+                  <span>{tr("划词翻译需要辅助功能权限。请在系统设置中启用 TYL，再选中文字并按下快捷键。", "Selection translation needs Accessibility permission. Enable TYL in System Settings, then select text and use your shortcut.")}</span>
+                  <div class="capture-actions">
+                    <button class="test-connection" type="button" onClick={() => {
+                      void invoke("open_accessibility_settings").catch((e) =>
+                        showError(localizedError(e, "Could not open Accessibility settings")));
+                    }}>
+                      {tr("打开辅助功能设置", "Open Accessibility Settings")}
+                    </button>
+                    <button class="test-connection" type="button" onClick={() => void refreshMacCaptureStatus()}>
+                      {tr("重新检查", "Check again")}
+                    </button>
+                  </div>
+                </div>
+              </Show>
               <Show when={restartRequired()}>
                 <div class="restart-notice" role="status">
                   <strong>{tr("渲染模式将在重启后生效", "Rendering changes take effect after restart")}</strong>
@@ -608,7 +646,9 @@ export function Settings() {
                     <div class="row">
                       <div class="row-text">
                         <div class="label">{tr("触发组合键", "Keyboard shortcut")}</div>
-                        <div class="hint">{tr("保存后重启应用生效", "Restart the app after saving")}</div>
+                        <div class="hint">{isMac
+                          ? tr("保存后立即生效", "Takes effect when saved")
+                          : tr("保存后重启应用生效", "Restart the app after saving")}</div>
                       </div>
                       <button
                         class={`hotkey-btn ${recording() ? "recording" : ""}`}
@@ -622,8 +662,13 @@ export function Settings() {
                       </button>
                     </div>
                     <p class="hint">
-                      {tr("建议 Alt/Shift 系组合，避免与常用软件冲突。", "Alt or Shift combinations are less likely to conflict with other apps.")}
+                      {isMac
+                        ? tr("默认热键为 Option+T。", "The default shortcut is Option+T.")
+                        : tr("建议 Alt/Shift 系组合，避免与常用软件冲突。", "Alt or Shift combinations are less likely to conflict with other apps.")}
                     </p>
+                    <Show when={macCaptureStatus()?.registered === false}>
+                      <p class="hint warn" role="status">{tr("快捷键注册失败，请选择另一个组合并保存。", "The shortcut could not be registered. Choose another combination and save.")}</p>
+                    </Show>
                   </section>
 
                   <section class="group">
@@ -643,37 +688,59 @@ export function Settings() {
                         }
                       />
                     </div>
-                    <p class="hint capture-hint">
-                      {tr("优先直接读取选区，必要时临时使用剪贴板并还原。终端仅直接读取，不模拟 Ctrl+C，避免中断正在运行的命令。", "TYL reads the selection directly when possible. If needed, it temporarily uses and restores the clipboard. In terminals, it never simulates Ctrl+C, so running commands stay safe.")}
-                    </p>
+                    <Show when={!isMac || macCaptureStatus()?.accessibility}>
+                      <p class="hint capture-hint">
+                        {isMac
+                          ? tr("已允许 TYL 通过辅助功能读取选区。", "TYL can read the selection using Accessibility.")
+                          : tr("优先直接读取选区，必要时临时使用剪贴板并还原。终端仅直接读取，不模拟 Ctrl+C，避免中断正在运行的命令。", "TYL reads the selection directly when possible. If needed, it temporarily uses and restores the clipboard. In terminals, it never simulates Ctrl+C, so running commands stay safe.")}
+                      </p>
+                    </Show>
                   </section>
 
                   <section class="group">
                     <div class="group-title">{tr("系统", "System")}</div>
-                    <div class="row">
-                      <div class="row-text">
-                        <div class="label">{tr("GPU 硬件加速", "GPU acceleration")}</div>
-                        <div class="hint" id="gpu-hint">{tr("默认关闭以减少显存占用；开启可利用 GPU 渲染。保存后重启生效。", "Off by default to reduce video memory. Enable for GPU rendering; restart after saving.")}</div>
-                        <Show when={gpuStatus()}>
-                          <div class="hint gpu-current" id="gpu-current">
-                            {tr("本次启动", "This session")}: {gpuStatus()!.software ? tr("软件渲染", "Software rendering") : tr("GPU 硬件加速", "GPU acceleration")}
-                            {gpuStatus()!.external_override ? tr(" · 外部启动参数禁用了 GPU", " · GPU disabled by launch arguments") : ""}
-                          </div>
-                        </Show>
+                    <Show when={isMac}>
+                      <div class="row">
+                        <div class="row-text">
+                          <div class="label">{tr("菜单栏图标", "Menu bar icon")}</div>
+                          <div class="hint">{tr("如果看不到 TYL，请在系统设置中允许显示，或隐藏不常用的项目腾出空间。", "If TYL is missing, allow it in System Settings or free up space by hiding unused items.")}</div>
+                        </div>
+                        <button class="test-connection" type="button" onClick={() => {
+                          void invoke("open_menu_bar_settings").catch((error) =>
+                            showError(localizedError(error, "Could not open Menu Bar settings")));
+                        }}>
+                          {tr("打开菜单栏设置", "Open Menu Bar Settings")}
+                        </button>
                       </div>
-                      <input
-                        type="checkbox"
-                        class="switch"
-                        checked={cur().gpu_acceleration ?? false}
-                        aria-label={tr("GPU 硬件加速", "GPU acceleration")}
-                        aria-describedby="gpu-hint gpu-current"
-                        onChange={(e) => patch({ gpu_acceleration: e.currentTarget.checked })}
-                      />
-                    </div>
+                    </Show>
+                    <Show when={!isMac}>
+                      <div class="row">
+                        <div class="row-text">
+                          <div class="label">{tr("GPU 硬件加速", "GPU acceleration")}</div>
+                          <div class="hint" id="gpu-hint">{tr("默认关闭以减少显存占用；开启可利用 GPU 渲染。保存后重启生效。", "Off by default to reduce video memory. Enable for GPU rendering; restart after saving.")}</div>
+                          <Show when={gpuStatus()}>
+                            <div class="hint gpu-current" id="gpu-current">
+                              {tr("本次启动", "This session")}: {gpuStatus()!.software ? tr("软件渲染", "Software rendering") : tr("GPU 硬件加速", "GPU acceleration")}
+                              {gpuStatus()!.external_override ? tr(" · 外部启动参数禁用了 GPU", " · GPU disabled by launch arguments") : ""}
+                            </div>
+                          </Show>
+                        </div>
+                        <input
+                          type="checkbox"
+                          class="switch"
+                          checked={cur().gpu_acceleration ?? false}
+                          aria-label={tr("GPU 硬件加速", "GPU acceleration")}
+                          aria-describedby="gpu-hint gpu-current"
+                          onChange={(e) => patch({ gpu_acceleration: e.currentTarget.checked })}
+                        />
+                      </div>
+                    </Show>
                     <div class="row">
                       <div class="row-text">
                         <div class="label">{tr("开机自启", "Launch at startup")}</div>
-                        <div class="hint">{tr("登录 Windows 后自动驻留后台", "Run in the background after signing in to Windows")}</div>
+                        <div class="hint">{isMac
+                          ? tr("登录 macOS 后自动驻留后台", "Run in the background after signing in to macOS")
+                          : tr("登录 Windows 后自动驻留后台", "Run in the background after signing in to Windows")}</div>
                       </div>
                       <input
                         type="checkbox"
@@ -972,7 +1039,9 @@ export function Settings() {
                     </Show>
                     <Show when={cur().proxy.mode === "system"}>
                       <p class="hint">
-                        {tr("自动使用 Windows 系统代理（Internet 选项），随系统开关联动。", "Automatically use the Windows system proxy (Internet Options) and follow its current state.")}
+                        {isMac
+                          ? tr("使用应用环境中的代理变量，例如 HTTPS_PROXY。", "Use proxy environment variables such as HTTPS_PROXY.")
+                          : tr("自动使用 Windows 系统代理（Internet 选项），随系统开关联动。", "Automatically use the Windows system proxy (Internet Options) and follow its current state.")}
                       </p>
                     </Show>
                   </section>

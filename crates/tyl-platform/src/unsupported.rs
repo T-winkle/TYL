@@ -1,5 +1,5 @@
 //! Stub backend for platforms without an implementation yet. Keeps the
-//! workspace compiling on Linux/macOS dev machines; every call fails with a
+//! workspace compiling on other dev machines; every call fails with a
 //! clear "not implemented on this platform yet" error. Mirrors the Windows
 //! backend's public surface (`WinCapture`/`WinLocator`) so downstream
 //! crates compile unchanged on every platform.

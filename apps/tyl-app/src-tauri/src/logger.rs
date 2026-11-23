@@ -1,4 +1,4 @@
-//! 极简文件日志：写入 exe 同目录的 tyl.log（目录只读时退回临时目录）。
+//! 极简文件日志，按平台选择可写目录。
 //! release 构建是 windows_subsystem="windows"，没有控制台，
 //! eprintln 全部不可见——这是唯一的诊断通道。
 
@@ -57,11 +57,19 @@ pub fn init() {
     }
 }
 
-/// 日志文件路径：exe 目录优先（用户从 Downloads 跑，可写），否则临时目录。
+/// 日志文件路径：macOS 使用用户数据目录，Windows 优先使用 exe 目录。
 pub fn log_path() -> std::path::PathBuf {
-    std::env::current_exe()
+    #[cfg(target_os = "macos")]
+    let directory = crate::settings::settings_path()
+        .parent()
+        .filter(|dir| std::fs::create_dir_all(dir).is_ok())
+        .map(std::path::Path::to_path_buf);
+    #[cfg(not(target_os = "macos"))]
+    let directory = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("tyl.log")))
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    directory
+        .map(|d| d.join("tyl.log"))
         .filter(|p| OpenOptions::new().append(true).create(true).open(p).is_ok())
         .unwrap_or_else(|| std::env::temp_dir().join("tyl.log"))
 }

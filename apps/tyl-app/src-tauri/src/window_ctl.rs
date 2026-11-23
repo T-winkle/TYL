@@ -16,6 +16,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{Emitter, WebviewWindow};
 
+// macOS uses global screen points throughout placement. Windows uses physical pixels.
+pub fn placement_position(x: i32, y: i32) -> tauri::Position {
+    #[cfg(target_os = "macos")]
+    return tauri::LogicalPosition::new(x, y).into();
+    #[cfg(not(target_os = "macos"))]
+    tauri::PhysicalPosition::new(x, y).into()
+}
+
+pub fn placement_size(width: u32, height: u32) -> tauri::Size {
+    #[cfg(target_os = "macos")]
+    return tauri::LogicalSize::new(width, height).into();
+    #[cfg(not(target_os = "macos"))]
+    tauri::PhysicalSize::new(width, height).into()
+}
+
 static FOCUS_REVISION: AtomicU64 = AtomicU64::new(0);
 
 /// WebView child-focus transitions and the native move loop can emit transient blur.
@@ -127,5 +142,27 @@ pub fn hide(w: &WebviewWindow) {
     if w.hide().is_ok() {
         let _ = w.emit("tyl://popup-hidden", ());
         crate::webview_memory::hidden(w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{placement_position, placement_size};
+
+    #[test]
+    fn popup_placement_uses_the_platform_coordinate_space() {
+        let position = placement_position(-550, 80);
+        let size = placement_size(560, 260);
+
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(position, tauri::LogicalPosition::new(-550.0, 80.0).into());
+            assert_eq!(size, tauri::LogicalSize::new(560.0, 260.0).into());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(position, tauri::PhysicalPosition::new(-550, 80).into());
+            assert_eq!(size, tauri::PhysicalSize::new(560, 260).into());
+        }
     }
 }

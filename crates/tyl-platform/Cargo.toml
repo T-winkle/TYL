@@ -11,5 +11,13 @@ tyl-core = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSScreen", "NSWorkspace", "NSRunningApplication"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["HIServices", "AXError", "AXUIElement", "AXValue"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["alloc", "CFNumber", "CFString", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGEvent", "CGEventTypes"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSEnumerator", "NSString"] }
+
 [dev-dependencies]
 serde_json = { workspace = true }

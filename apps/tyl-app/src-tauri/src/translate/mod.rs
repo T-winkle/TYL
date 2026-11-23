@@ -12,6 +12,7 @@ pub mod iciba;
 pub mod llm;
 pub mod mymemory;
 pub mod transmart;
+#[cfg(target_os = "windows")]
 pub mod tts;
 pub mod yandex;
 pub mod youdao;

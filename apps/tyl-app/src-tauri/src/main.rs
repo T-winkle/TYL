@@ -6,10 +6,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+#[cfg(target_os = "windows")]
 mod desktop_actions;
 mod gpu;
 mod i18n;
 mod logger;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(feature = "memory-bench")]
 mod memory_bench;
 mod pipeline;
@@ -27,7 +30,9 @@ use std::sync::Arc;
 
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::{Shortcut, ShortcutEvent, ShortcutState};
 
 /// 前端就绪标志（就绪前管线不推送事件，避免丢首批取词）。
 pub struct ReadyFlag(pub AtomicBool);
@@ -57,6 +62,34 @@ impl HotkeyGestureGate {
     }
 }
 
+fn capture_shortcut_handler(
+    pipeline: Arc<pipeline::Pipeline>,
+) -> impl Fn(&tauri::AppHandle, &Shortcut, ShortcutEvent) + Send + Sync + 'static {
+    let gesture = HotkeyGestureGate::default();
+    move |app, _shortcut, event| match event.state() {
+        ShortcutState::Pressed if gesture.begin_press() => {
+            if !app.state::<ReadyFlag>().0.load(Ordering::SeqCst) {
+                #[cfg(target_os = "macos")]
+                logger::warn("热键触发，但弹窗前端尚未就绪");
+                #[cfg(not(target_os = "macos"))]
+                logger::log_str("热键触发，但前端尚未就绪；已跳过本次取词");
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            logger::info("[macOS] 划词热键已触发");
+            #[cfg(not(target_os = "macos"))]
+            logger::log_str("热键触发");
+            pipeline::Pipeline::on_hotkey(app.clone(), Arc::clone(&pipeline));
+        }
+        ShortcutState::Pressed => logger::trace("热键仍处于按下状态：已忽略系统自动重复"),
+        ShortcutState::Released => {
+            if gesture.release() {
+                logger::trace("热键已释放：下一次取词已重新启用");
+            }
+        }
+    }
+}
+
 fn main() {
     // Load the logging threshold before producing startup diagnostics (Off too).
     let cfg = settings::load();
@@ -74,8 +107,11 @@ fn main() {
     tyl_platform::backend::clipboard_fallback::set_log_hook(logger::trace);
 
     // DPI 感知必须最先声明（Windows），否则所有坐标被虚拟化。
-    tyl_platform::backend::enable_dpi_awareness();
-    logger::log_str("DPI 感知已声明");
+    #[cfg(target_os = "windows")]
+    {
+        tyl_platform::backend::enable_dpi_awareness();
+        logger::log_str("DPI 感知已声明");
+    }
 
     // 设置加载（热键/LLM/代理/策略）。
     gpu::initialize(cfg.gpu_acceleration);
@@ -92,7 +128,7 @@ fn main() {
 
     let pipeline = Arc::new(pipeline::Pipeline::new());
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // 单实例：二次启动时唤起已有实例的设置窗口（并退出新进程）。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -112,6 +148,7 @@ fn main() {
             commands::speak,
             commands::pronunciation_audio,
             commands::copy_translation,
+            #[cfg(target_os = "windows")]
             commands::replace_selection,
             commands::get_settings,
             commands::test_llm,
@@ -120,7 +157,13 @@ fn main() {
             commands::get_autostart,
             commands::set_autostart,
             commands::frontend_ready,
-            commands::frontend_log
+            commands::frontend_log,
+            #[cfg(target_os = "macos")]
+            macos::mac_capture_status,
+            #[cfg(target_os = "macos")]
+            macos::open_accessibility_settings,
+            #[cfg(target_os = "macos")]
+            macos::open_menu_bar_settings,
         ])
         // 页面加载生命周期打点：WebView 重建等异常可在此发现
         .on_page_load(|webview, payload| match payload.event() {
@@ -153,14 +196,10 @@ fn main() {
                 let quit_app = app.handle().clone();
                 let settings_app = app.handle().clone();
                 let language = settings::current().language;
-                let mut tray = TrayIconBuilder::with_id("main")
-                    .tooltip(i18n::text(
-                        &language,
-                        "TYL 划词翻译（右键菜单）",
-                        "TYL Selection Translator (right-click for menu)",
-                    ))
+                let tray = TrayIconBuilder::with_id("main")
+                    .tooltip(tray_tooltip(&language))
                     .menu(&build_tray_menu(app.handle(), &language)?)
-                    .show_menu_on_left_click(false)
+                    .show_menu_on_left_click(cfg!(target_os = "macos"))
                     .on_menu_event(move |_app, event| match event.id.as_ref() {
                         "quit" => {
                             logger::log_str("退出");
@@ -173,42 +212,37 @@ fn main() {
                         }
                         _ => {}
                     });
-                if let Some(icon) = app.default_window_icon() {
-                    tray = tray.icon(icon.clone());
-                }
-                tray.build(app)?;
-                logger::log_str("托盘已创建（右键弹菜单）");
+                #[cfg(target_os = "macos")]
+                let tray = tray
+                    .icon(tauri::image::Image::from_bytes(include_bytes!(
+                        "../icons/tray-macos.png"
+                    ))?)
+                    .icon_as_template(true);
+                #[cfg(not(target_os = "macos"))]
+                let tray = if let Some(icon) = app.default_window_icon() {
+                    tray.icon(icon.clone())
+                } else {
+                    tray
+                };
+                let tray = tray.build(app)?;
+                #[cfg(target_os = "macos")]
+                macos::compact_menu_bar_item(&tray)?;
+                #[cfg(not(target_os = "macos"))]
+                let _ = tray;
+                logger::log_str("托盘已创建");
 
                 // 全局热键（设置里的值）→ 管线。
-                let hotkey_app = app.handle().clone();
-                let hotkey_pipeline = Arc::clone(&pipeline);
-                let hotkey_gesture = Arc::new(HotkeyGestureGate::default());
-                app.global_shortcut().on_shortcut(
-                    settings::current().hotkey.as_str(),
-                    move |_app, _sc, event| match event.state() {
-                        ShortcutState::Pressed => {
-                            if !hotkey_gesture.begin_press() {
-                                logger::trace("热键仍处于按下状态：已忽略系统自动重复");
-                                return;
-                            }
-                            if !hotkey_app.state::<ReadyFlag>().0.load(Ordering::SeqCst) {
-                                logger::log_str("热键触发，但前端尚未就绪；已跳过本次取词");
-                                return;
-                            }
-                            logger::log_str("热键触发");
-                            pipeline::Pipeline::on_hotkey(
-                                hotkey_app.clone(),
-                                Arc::clone(&hotkey_pipeline),
-                            );
-                        }
-                        ShortcutState::Released => {
-                            if hotkey_gesture.release() {
-                                logger::trace("热键已释放：下一次取词已重新启用");
-                            }
-                        }
-                    },
-                )?;
-                logger::log_str(&format!("热键 {} 已注册", settings::current().hotkey));
+                #[cfg(target_os = "macos")]
+                macos::install_hotkey(app.handle(), Arc::clone(&pipeline));
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let hotkey = settings::current().hotkey;
+                    app.global_shortcut().on_shortcut(
+                        hotkey.as_str(),
+                        capture_shortcut_handler(Arc::clone(&pipeline)),
+                    )?;
+                    logger::log_str(&format!("热键 {hotkey} 已注册"));
+                }
 
                 #[cfg(feature = "memory-bench")]
                 memory_bench::start(app.handle().clone(), Arc::clone(&pipeline));
@@ -232,9 +266,25 @@ fn main() {
                     window.app_handle().emit("tyl://settings-closed", ()).ok();
                 }
             }
-        })
-        .run(context)
-        .expect("error while running tyl-app");
+        });
+
+    #[cfg(not(target_os = "macos"))]
+    builder.run(context).expect("error while running tyl-app");
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut app = builder.build(context).expect("error while running tyl-app");
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        app.run(|app, event| {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                open_settings_window(app);
+            }
+        });
+    }
 }
 
 /// 打开设置窗口（已存在则聚焦）。
@@ -245,7 +295,7 @@ pub fn open_settings_window(app: &tauri::AppHandle) {
         return;
     }
     let language = settings::current().language;
-    let _ = tauri::WebviewWindowBuilder::new(
+    let builder = tauri::WebviewWindowBuilder::new(
         app,
         "settings",
         tauri::WebviewUrl::App("/settings.html".into()),
@@ -257,8 +307,12 @@ pub fn open_settings_window(app: &tauri::AppHandle) {
     .min_inner_size(760.0, 600.0)
     .resizable(true)
     .minimizable(false)
-    .center()
-    .build();
+    .center();
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
+    if let Err(error) = builder.build() {
+        logger::error(&format!("打开设置窗口失败: {error}"));
+    }
 }
 
 fn build_tray_menu(
@@ -280,11 +334,19 @@ pub(crate) fn refresh_tray_i18n(app: &tauri::AppHandle) {
     if let Ok(menu) = build_tray_menu(app, &language) {
         let _ = tray.set_menu(Some(menu));
     }
-    let _ = tray.set_tooltip(Some(i18n::text(
-        &language,
-        "TYL 划词翻译（右键菜单）",
-        "TYL Selection Translator (right-click for menu)",
-    )));
+    let _ = tray.set_tooltip(Some(tray_tooltip(&language)));
+}
+
+fn tray_tooltip(language: &str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        i18n::text(language, "TYL 划词翻译", "TYL Selection Translator")
+    } else {
+        i18n::text(
+            language,
+            "TYL 划词翻译（右键菜单）",
+            "TYL Selection Translator (right-click for menu)",
+        )
+    }
 }
 
 #[cfg(test)]

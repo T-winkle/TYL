@@ -12,12 +12,12 @@
 <p align="center">
   <a href="https://github.com/T-winkle/TYL/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/T-winkle/TYL/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Windows 10 / 11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-4f64ad?logo=windows11&logoColor=white">
-  <img alt="Release beta" src="https://img.shields.io/badge/release-0.1.0--beta.5-4f64ad">
+  <img alt="Release beta" src="https://img.shields.io/badge/release-0.1.0--beta.6-4f64ad">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-263238"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/T-winkle/TYL/releases/latest"><strong>下载最新版</strong></a>
+  <a href="https://github.com/T-winkle/TYL/releases"><strong>下载最新版</strong></a>
   · <a href="#快速开始">快速开始</a>
   · <a href="#性能数据">性能数据</a>
   · <a href="#本地开发">参与开发</a>
@@ -29,7 +29,7 @@
 </p>
 
 > [!IMPORTANT]
-> 当前公开测试版为 `0.1.0-beta.5`，率先支持 Windows 10 / 11 x64。测试版暂未进行 Windows 代码签名，首次运行可能出现 SmartScreen 提示；请只从本仓库下载并核对 SHA-256。
+> `0.1.0-beta.6` 的公开安装包面向 Windows 10 / 11 x64。未签名安装包首次运行可能出现 SmartScreen 提示，请从本仓库下载并核对 SHA-256。
 
 ## 为什么是 TYL
 
@@ -102,7 +102,7 @@
 
 ## 本地开发
 
-TYL 当前面向 Windows 构建。开始前先从托盘退出正在运行的旧版本，避免可执行文件被占用。
+在 Windows 上，开始前先从托盘退出正在运行的旧版本，避免可执行文件被占用。
 
 ```powershell
 npm --prefix apps/tyl-app/ui ci
@@ -115,9 +115,25 @@ cargo build -p tyl-app
 .\target\debug\tyl-app.exe
 ```
 
-界面预览：
+### macOS 本地构建
 
-```powershell
+安装 Xcode Command Line Tools、Rust（rustup）和 Node.js 后，从仓库根目录运行：
+
+```sh
+npm --prefix apps/tyl-app/ui ci
+(cd apps/tyl-app && ./ui/node_modules/.bin/tauri build -- --locked)
+open target/release/bundle/macos/TYL.app
+```
+
+TYL 启动后驻留菜单栏。点击 TYL 图标可打开设置。如果图标被刘海遮挡，可以在 macOS 的菜单栏设置里隐藏不常用的项目。快捷键保存后立即生效，默认为 **⌥ Option+T**。首次使用时，在划词弹窗中点击「打开辅助功能设置」并启用 TYL。授权后，在「文本编辑」或其他提供辅助功能选区的应用中选中文字，再按快捷键。
+
+macOS 本地构建使用 ad-hoc 签名。重新编译后，如果系统「辅助功能」里的 TYL 已开启，但应用仍提示授权，请从列表中移除旧条目，再添加并启用当前的 `TYL.app`。支持直接取词、词典、翻译、复制译文和朗读。剪贴板取词降级与原文替换目前由 Windows 后端提供。
+
+CI 在 Windows x64、Apple Silicon Mac 和 Intel Mac 上运行工作区测试，并构建各平台的应用包。
+
+### 界面预览
+
+```sh
 npm --prefix apps/tyl-app/ui run dev
 ```
 
@@ -126,7 +142,7 @@ npm --prefix apps/tyl-app/ui run dev
 ```text
 crates/
 ├── tyl-core/       平台无关契约、热键、定位与文本清理
-├── tyl-platform/   Windows UIA、剪贴板与选区能力
+├── tyl-platform/   Windows UIA、macOS AX、剪贴板与选区能力
 └── tyl-cli/        取词与显示器诊断工具
 apps/tyl-app/
 ├── src-tauri/      Tauri 壳、翻译引擎、设置与窗口生命周期
@@ -135,7 +151,7 @@ apps/tyl-app/
 
 ## 当前边界
 
-- 当前只正式支持 Windows 10 / 11 x64。
+- 当前正式发布 Windows 10 / 11 x64，macOS 可本地构建。
 - 自绘编辑器应用暴露的 UIA 能力因版本而异；无法安全确认选区时，替换功能会拒绝执行，但复制译文仍然可用。
 - 尚未提供自动更新。
 

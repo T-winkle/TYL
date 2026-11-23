@@ -1,20 +1,18 @@
 //! Popup placement geometry.
 //!
-//! All coordinates are **physical pixels**. Convert to logical at the
-//! windowing boundary (Tauri `set_position` takes logical units) — see
-//! `scale` helpers at the bottom of this file.
+//! Geometry uses one coordinate space per platform: physical pixels on
+//! Windows and global screen points on macOS.
 
 use serde::{Deserialize, Serialize};
 
-/// Physical-pixel point.
+/// Point in desktop coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
-/// Physical-pixel rectangle. Windows convention: top-left origin, y grows
-/// downward (matches both Win32 screen coords and UIA BoundingRectangles).
+/// Desktop rectangle with a top-left origin and y increasing downward.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub left: i32,
@@ -35,7 +33,7 @@ impl Size {
     }
 }
 
-/// A monitor's total and working (taskbar-excluded) rectangles, physical px.
+/// A monitor's full rectangle and usable work area in desktop coordinates.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MonitorInfo {
     pub rect: Rect,

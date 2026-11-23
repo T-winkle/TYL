@@ -23,12 +23,7 @@ static SELECTION: Mutex<Option<Selection>> = Mutex::new(None);
 /// Missing accessibility metadata is common in custom editors. An explicit
 /// user click may attempt a verified paste; known read-only ranges cannot.
 pub fn can_offer_replacement(editable: Option<bool>, target_exe: Option<&str>) -> bool {
-    #[cfg(target_os = "windows")]
-    if target_exe.is_some_and(tyl_platform::backend::is_denied_terminal) {
-        return false;
-    }
-    let _ = target_exe;
-    editable != Some(false)
+    editable != Some(false) && !target_exe.is_some_and(tyl_platform::backend::is_denied_terminal)
 }
 
 pub fn remember(
@@ -65,23 +60,8 @@ fn matches_original(selection: &Selection, identity: Option<&[i32]>, text: &str)
         && selection.original == text
 }
 
-#[cfg(target_os = "windows")]
 pub use native::{copy, foreground, replace};
 
-#[cfg(not(target_os = "windows"))]
-pub fn foreground() -> TargetWindow {
-    TargetWindow::default()
-}
-#[cfg(not(target_os = "windows"))]
-pub fn copy(_owner: usize, _text: &str) -> Result<(), String> {
-    Err("当前平台暂不支持复制".into())
-}
-#[cfg(not(target_os = "windows"))]
-pub fn replace(_owner: usize, _request_id: u64, _text: &str) -> Result<(), String> {
-    Err("当前平台暂不支持替换".into())
-}
-
-#[cfg(target_os = "windows")]
 mod native {
     use super::*;
     use std::time::{Duration, Instant};
@@ -433,7 +413,6 @@ mod tests {
         assert!(can_offer_replacement(None, Some("custom-editor")));
         assert!(can_offer_replacement(Some(true), Some("custom-editor")));
         assert!(!can_offer_replacement(Some(false), Some("custom-editor")));
-        #[cfg(target_os = "windows")]
         for exe in ["pwsh", "WindowsTerminal", "conhost"] {
             assert!(!can_offer_replacement(None, Some(exe)));
             assert!(!can_offer_replacement(Some(true), Some(exe)));

@@ -185,8 +185,15 @@ pub fn fit_popup_height(app: AppHandle, height: f64, viewport_width: f64, grow_u
     let (Ok(position), Ok(size)) = (w.outer_position(), w.outer_size()) else {
         return;
     };
+    #[cfg(target_os = "macos")]
+    let placement_scale = w.scale_factor().unwrap_or(1.0);
+    #[cfg(target_os = "macos")]
+    let (position, size) = (
+        position.to_logical::<i32>(placement_scale),
+        size.to_logical::<u32>(placement_scale),
+    );
 
-    let (monitors, _) = crate::platform_capture::monitors();
+    let monitors = crate::platform_capture::monitors(&app);
     if monitors.is_empty() {
         return;
     }
@@ -198,7 +205,13 @@ pub fn fit_popup_height(app: AppHandle, height: f64, viewport_width: f64, grow_u
     let scale = monitor.scale.max(0.1);
     // CSS pixels can differ from native logical pixels (WebView zoom / mixed DPI).
     // Map the measured DOM height using the actual physical-to-CSS viewport ratio.
+    #[cfg(not(target_os = "macos"))]
     let content_width = w.inner_size().map(|s| s.width).unwrap_or(size.width);
+    #[cfg(target_os = "macos")]
+    let content_width = w
+        .inner_size()
+        .map(|s| s.to_logical::<u32>(placement_scale).width)
+        .unwrap_or(size.width);
     let natural_height = css_to_logical_height(height, viewport_width, content_width, scale);
     let work_height = f64::from(monitor.work.bottom - monitor.work.top) / scale;
     let max_height = (work_height * 0.86).clamp(1.0, 940.0);
@@ -218,12 +231,15 @@ pub fn fit_popup_height(app: AppHandle, height: f64, viewport_width: f64, grow_u
     } else {
         position.y
     };
-    let next_position = tauri::PhysicalPosition::new(
+    let next_position = crate::window_ctl::placement_position(
         position.x.clamp(min_x, max_x),
         preferred_y.clamp(min_y, max_y),
     );
 
-    let _ = w.set_size(tauri::PhysicalSize::new(size.width, physical_height as u32));
+    let _ = w.set_size(crate::window_ctl::placement_size(
+        size.width,
+        physical_height as u32,
+    ));
     let _ = w.set_position(next_position);
     crate::logger::log_str(&format!(
         "[popup] 高度适配: css={height:.0} viewport={viewport_width:.0} physical_width={content_width} scale={scale} requested={natural_height:.0} applied={fitted_height:.0} grow_upward={grow_upward}"
@@ -256,7 +272,23 @@ mod layout_tests {
 pub fn speak(text: String) {
     #[cfg(target_os = "windows")]
     crate::translate::tts::speak(&text);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        if let Ok(mut child) = Command::new("/usr/bin/say")
+            .args(["-f", "-"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut input) = child.stdin.take() {
+                let _ = input.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    });
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = text;
 }
 
@@ -295,8 +327,8 @@ pub async fn pronunciation_audio(word: String, accent: String) -> Result<Vec<u8>
     Ok(bytes.to_vec())
 }
 
+#[cfg(target_os = "windows")]
 fn popup_owner(app: &AppHandle) -> usize {
-    #[cfg(target_os = "windows")]
     if let Some(window) = app.get_webview_window("popup") {
         return window.hwnd().map(|h| h.0 as usize).unwrap_or_default();
     }
@@ -305,12 +337,30 @@ fn popup_owner(app: &AppHandle) -> usize {
 
 #[tauri::command]
 pub async fn copy_translation(app: AppHandle, text: String) -> Result<(), String> {
-    let owner = popup_owner(&app);
-    tauri::async_runtime::spawn_blocking(move || crate::desktop_actions::copy(owner, &text))
-        .await
-        .map_err(|e| e.to_string())?
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(crate::macos::copy_translation(&text));
+        })
+        .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let owner = popup_owner(&app);
+        tauri::async_runtime::spawn_blocking(move || crate::desktop_actions::copy(owner, &text))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, text);
+        Err("当前平台暂不支持复制".into())
+    }
 }
 
+#[cfg(target_os = "windows")]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn replace_selection(
     app: AppHandle,
@@ -382,6 +432,9 @@ pub fn save_settings(app: AppHandle, settings: crate::settings::Settings) -> Res
             return Err("代理地址需以 http:// 或 socks5:// 开头".into());
         }
     }
+    #[cfg(target_os = "macos")]
+    crate::macos::save_with_hotkey(&app, settings)?;
+    #[cfg(not(target_os = "macos"))]
     crate::settings::save(settings)?;
     crate::refresh_tray_i18n(&app);
     // 代理变更 → 重建 HTTP client（下次请求生效新代理）
@@ -412,6 +465,9 @@ pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
 #[tauri::command]
 pub fn frontend_ready(app: AppHandle, state: tauri::State<'_, crate::ReadyFlag>) {
     state.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    crate::logger::info("[macOS] 翻译弹窗已就绪");
+    #[cfg(not(target_os = "macos"))]
     crate::logger::log_str("前端就绪 (frontend_ready)");
     if let Some(window) = app.get_webview_window("popup") {
         crate::webview_memory::hidden(&window);

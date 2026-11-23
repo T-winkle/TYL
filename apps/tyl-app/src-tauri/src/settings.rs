@@ -177,8 +177,15 @@ impl Default for LanguageRoutingSettings {
 
 static SETTINGS: RwLock<Option<Settings>> = RwLock::new(None);
 
-/// 配置文件路径：exe 同目录 settings.json（便携式，跟 exe 走）。
+/// Windows keeps settings beside the executable. macOS bundles are signed and read-only at runtime.
 pub fn settings_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/com.zzyjoy.tyl/settings.json"))
+        .unwrap_or_else(|| std::env::temp_dir().join("tyl-settings.json"));
+
+    #[cfg(not(target_os = "macos"))]
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("settings.json")))
@@ -284,14 +291,27 @@ pub fn save(mut s: Settings) -> Result<(), String> {
     ) {
         s.result_display = RESULT_DISPLAY_TABS.into();
     }
-    if let Err(e) = std::fs::write(
-        settings_path(),
-        serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?,
-    ) {
-        return Err(format!("写入失败: {e}"));
-    }
+    let path = settings_path();
+    let json = serde_json::to_string_pretty(&s).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    let written = write_settings_atomically(&path, &json);
+    #[cfg(not(target_os = "macos"))]
+    let written = std::fs::write(path, json);
+    written.map_err(|error| format!("写入失败: {error}"))?;
     *SETTINGS.write().unwrap() = Some(s.clone());
     crate::logger::set_level(s.log_level);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn write_settings_atomically(path: &std::path::Path, json: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let directory = path.parent().expect("settings path has a parent directory");
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(json.as_bytes())?;
+    file.persist(path)?;
     Ok(())
 }
 
@@ -470,6 +490,21 @@ fn system_proxy() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settings_can_be_created_and_replaced_without_leaving_temp_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let support = directory.path().join("Application Support");
+        let path = support.join("settings.json");
+        write_settings_atomically(&path, r#"{"hotkey":"alt+t"}"#).unwrap();
+        write_settings_atomically(&path, r#"{"hotkey":"alt+e"}"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            r#"{"hotkey":"alt+e"}"#
+        );
+        assert_eq!(std::fs::read_dir(support).unwrap().count(), 1);
+    }
 
     #[test]
     fn default_hotkey_is_alt_t() {

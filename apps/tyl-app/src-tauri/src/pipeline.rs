@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tyl_core::capture::CaptureOutcome;
-use tyl_core::locator::{place_popup, Size};
+use tyl_core::locator::{place_popup, Point, Rect, Size};
 
 use crate::translate;
 use crate::window_ctl;
@@ -106,7 +106,7 @@ pub struct TranslateEvent {
 /// 管线状态：持有平台取词器 + 防抖计数。
 pub struct Pipeline {
     #[allow(clippy::struct_field_names)]
-    capture: Option<crate::platform_capture::CaptureHandle>,
+    capture: crate::platform_capture::CaptureHandle,
     /// 热键连打防抖：递增的代际号，过期的取词/翻译结果直接丢弃。
     generation: Arc<AtomicU64>,
     /// 平台取词单飞锁。翻译请求可以并行，但 UIA/剪贴板取词不能重叠。
@@ -145,6 +145,7 @@ impl Pipeline {
             }
             let _flight = CaptureFlightGuard(&pipeline.capture_in_flight);
             let gen = pipeline.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            #[cfg(target_os = "windows")]
             crate::desktop_actions::invalidate();
             if let Err(e) = run_capture_and_show(app, &pipeline, gen) {
                 crate::logger::error(&format!("[tyl] pipeline error: {e}"));
@@ -494,6 +495,7 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
     let cfg = crate::settings::current();
     // 1. 锚点（在取词前快照；DPI 感知在启动时已声明）
     let anchor = crate::platform_capture::capture_anchor();
+    #[cfg(target_os = "windows")]
     let target_window = crate::desktop_actions::foreground();
     crate::logger::log_str(&format!(
         "[gen {gen}] 锚点: exe={:?} cursor={:?}",
@@ -504,13 +506,12 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
     let started = std::time::Instant::now();
     let outcome = pipeline
         .capture
-        .as_ref()
-        .ok_or("capture backend unavailable")?
         .capture_detailed(&anchor, Duration::from_millis(800));
     crate::logger::log_str(&format!(
         "[gen {gen}] 取词完成 {:?}ms: {}",
         started.elapsed().as_millis(),
         match &outcome {
+            CaptureOutcome::Primary(_) if cfg!(target_os = "macos") => "primary(ax)".to_string(),
             CaptureOutcome::Primary(_) => "primary(uia)".to_string(),
             CaptureOutcome::Fallback(_) => "fallback(clipboard)".to_string(),
             CaptureOutcome::Failed(e) => format!("failed: {e}"),
@@ -537,67 +538,33 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
             let use_dictionary = cfg.dictionary.enabled
                 && direction.target == "zh-CN"
                 && translate::dictionary::is_single_word(&text);
-            let can_replace = crate::desktop_actions::can_offer_replacement(
-                t.editable,
-                anchor.target_exe.as_deref(),
-            );
-            crate::logger::log_str(&format!(
-                "[replace] capture editable={:?} allowed={can_replace} identity={}",
-                t.editable,
-                t.selection_id.is_some()
-            ));
-            crate::desktop_actions::remember(
-                gen,
-                target_window,
-                &t.text,
-                can_replace,
-                t.selection_id.clone(),
-            );
+            #[cfg(target_os = "windows")]
+            let can_replace = {
+                let allowed = crate::desktop_actions::can_offer_replacement(
+                    t.editable,
+                    anchor.target_exe.as_deref(),
+                );
+                crate::logger::log_str(&format!(
+                    "[replace] capture editable={:?} allowed={allowed} identity={}",
+                    t.editable,
+                    t.selection_id.is_some()
+                ));
+                crate::desktop_actions::remember(
+                    gen,
+                    target_window,
+                    &t.text,
+                    allowed,
+                    t.selection_id,
+                );
+                allowed
+            };
+            #[cfg(not(target_os = "windows"))]
+            let can_replace = false;
             crate::logger::log_str(&format!(
                 "[gen {gen}] 文本({} 字符)，不记录正文",
                 t.text.chars().count()
             ));
-            // 4. 定位：选区矩形优先，否则鼠标位置；clamp 到所在显示器工作区
-            let (monitors, scale_factors_ok) = crate::platform_capture::monitors();
-            if !scale_factors_ok || monitors.is_empty() {
-                return Err("no monitors".into());
-            }
-            let anchor_point = t
-                .selection_rect
-                .map(|r| tyl_core::locator::Point {
-                    x: r.left,
-                    y: r.bottom,
-                })
-                .or(anchor.cursor)
-                .unwrap_or(tyl_core::locator::Point { x: 200, y: 200 });
-            let monitor = tyl_core::locator::pick_monitor(&monitors, anchor_point);
-            // Initial size in CSS pixels; the frontend fits complete content after rendering.
-            // locator/显示器矩形是物理像素 → 尺寸也要转物理（×scale），
-            // 否则高 DPI 下窗口逻辑尺寸会变小，译文区被压没。
-            let scale = monitor.scale;
-            let popup_size = Size::new(
-                (560.0 * scale).round() as i32,
-                (260.0 * scale).round() as i32,
-            );
-            let margin = (8.0 * scale).round() as i32;
-            let preferred_y = t
-                .selection_rect
-                .map(|rect| rect.bottom + margin)
-                .or_else(|| anchor.cursor.map(|cursor| cursor.y + 2 * margin))
-                .unwrap_or(monitor.work.top + margin);
-            let grow_upward = preferred_y + popup_size.height > monitor.work.bottom - margin;
-            let pos = place_popup(t.selection_rect, anchor.cursor, popup_size, monitor, margin);
-
-            // 5. 移动窗口到位（此时仍隐藏，避免旧内容闪现）。
-            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
-            let _ = window.set_size(tauri::PhysicalSize::new(
-                popup_size.width,
-                popup_size.height,
-            ));
-            crate::logger::log_str(&format!(
-                "[gen {gen}] 定位: pos=({},{}) 显示器 scale={}",
-                pos.x, pos.y, monitor.scale
-            ));
+            let grow_upward = position_popup(&window, t.selection_rect, anchor.cursor, 260, gen)?;
 
             // 6. 先推事件再显示窗口：前端渲染新内容（IPC 往返 ~10ms）
             crate::webview_memory::prepare_capture(&window)?;
@@ -649,15 +616,83 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
             // 给前端一帧的渲染时间（事件监听 + SolidJS 细粒度更新）。
             std::thread::sleep(Duration::from_millis(30));
             window_ctl::show_focused(&window);
+            #[cfg(target_os = "macos")]
+            crate::logger::info(&format!("[gen {gen}] [macOS] 已取词并打开翻译弹窗"));
             crate::logger::log_str(&format!("[gen {gen}] 事件已推送，窗口已显示"));
             Ok(())
         }
         CaptureOutcome::Failed(e) => {
-            // 取词失败：不弹窗（M2 简化；M3 可弹 toast 提示原因）
             crate::logger::warn(&format!("[gen {gen}] 取词失败: {e}"));
+            #[cfg(target_os = "macos")]
+            if matches!(e, tyl_core::capture::CaptureError::PermissionDenied) {
+                #[derive(Serialize, Clone)]
+                struct PermissionNotice<'a> {
+                    language: &'a str,
+                    theme: &'a str,
+                    color_scheme: &'a str,
+                }
+                position_popup(&window, None, anchor.cursor, 180, gen)?;
+                crate::webview_memory::prepare_capture(&window)?;
+                window
+                    .emit(
+                        "tyl://capture-permission-required",
+                        PermissionNotice {
+                            language: &cfg.language,
+                            theme: &cfg.theme,
+                            color_scheme: &cfg.color_scheme,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                std::thread::sleep(Duration::from_millis(30));
+                window_ctl::show_focused(&window);
+                crate::logger::info(&format!("[gen {gen}] [macOS] 已显示取词授权提示"));
+            }
             Ok(())
         }
     }
+}
+
+fn position_popup(
+    window: &tauri::WebviewWindow,
+    selection: Option<Rect>,
+    cursor: Option<Point>,
+    height: i32,
+    gen: u64,
+) -> Result<bool, String> {
+    let monitors = crate::platform_capture::monitors(window.app_handle());
+    if monitors.is_empty() {
+        return Err("no monitors".into());
+    }
+    let anchor_point = selection
+        .map(|rect| Point {
+            x: rect.left,
+            y: rect.bottom,
+        })
+        .or(cursor)
+        .unwrap_or(Point { x: 200, y: 200 });
+    let monitor = tyl_core::locator::pick_monitor(&monitors, anchor_point);
+    // Windows converts CSS pixels to physical pixels. macOS keeps screen points.
+    let scale = monitor.scale;
+    let size = Size::new(
+        (560.0 * scale).round() as i32,
+        (height as f64 * scale).round() as i32,
+    );
+    let margin = (8.0 * scale).round() as i32;
+    let preferred_y = selection
+        .map(|rect| rect.bottom + margin)
+        .or_else(|| cursor.map(|point| point.y + 2 * margin))
+        .unwrap_or(monitor.work.top + margin);
+    let pos = place_popup(selection, cursor, size, monitor, margin);
+    let _ = window.set_position(window_ctl::placement_position(pos.x, pos.y));
+    let _ = window.set_size(window_ctl::placement_size(
+        size.width as u32,
+        size.height as u32,
+    ));
+    crate::logger::log_str(&format!(
+        "[gen {gen}] 定位: pos=({},{}) 显示器 scale={}",
+        pos.x, pos.y, scale
+    ));
+    Ok(preferred_y + size.height > monitor.work.bottom - margin)
 }
 
 /// Benchmark input bypasses UIA only; real translation and popup rendering remain.

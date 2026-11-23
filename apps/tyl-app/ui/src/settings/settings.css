@@ -770,6 +770,15 @@ body {
   border-top: 1px solid var(--divider);
   padding-top: 9px;
 }
+.capture-permission {
+  max-height: none;
+}
+.capture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
 .primary {
   flex: none;
   display: inline-flex;
@@ -857,6 +866,49 @@ body {
 .test-connection:disabled { opacity: .5; cursor: default; }
 .connection-result { margin: 12px 0 0; color: var(--accent); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .connection-result.error { color: var(--danger, #c25858); }
+:root[data-platform="macos"] {
+  --font: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+}
+:root[data-platform="macos"],
+:root[data-platform="macos"] body {
+  background: transparent;
+}
+:root[data-platform="macos"] body {
+  font-size: 14px;
+  -webkit-font-smoothing: auto;
+}
+:root[data-platform="macos"] #root {
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--bg);
+}
+:root[data-platform="macos"] :is(.label, .group-title, .nav-items button, .primary, .input) {
+  font-size: 14px;
+}
+:root[data-platform="macos"] :is(.hint, .page-head p, .nav-sub, .nav-footer span, .status, .settings-message) {
+  font-size: 13px;
+}
+:root[data-platform="macos"] :is(.hotkey-btn, .theme-options button, .seg button) {
+  font-size: 13px;
+}
+:root[data-platform="macos"] .theme-row {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+:root[data-platform="macos"] .theme-row .theme-options {
+  min-width: min-content;
+}
+:root[data-platform="macos"] .theme-row .hint {
+  max-width: none;
+  white-space: nowrap;
+}
+:root[data-platform="macos"] .theme-options button {
+  flex-basis: auto;
+  white-space: nowrap;
+}
+:root[data-platform="macos"] .theme-options svg {
+  flex: none;
+}
 @media (max-width: 840px) {
   .theme-row {
     flex-wrap: wrap;

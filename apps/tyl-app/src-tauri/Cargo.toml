@@ -31,6 +31,14 @@ tauri-plugin-single-instance = "2.4"
 windows = { workspace = true }
 webview2-com = "0.38.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString"] }
+tempfile = "3"
+# The popup is transparent on both platforms. Only the macOS WebView needs this feature.
+tauri = { version = "2.11", features = ["macos-private-api"] }
+
 [features]
 # 生产构建走 custom protocol（资源内嵌），dev 走 vite server
 default = ["custom-protocol"]
