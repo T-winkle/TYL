@@ -23,6 +23,8 @@
   · <a href="#本地开发">参与开发</a>
 </p>
 
+TYL 是纯客户端应用，无法知道有多少用户在使用，如果你平时也用它查词或翻译，欢迎[ ⭐ Star 仓库](https://github.com/T-winkle/TYL)。谢谢！
+
 <p align="center">
   <img src="assets/readme/tyl-light.png" width="49%" alt="TYL 浅色界面">
   <img src="assets/readme/tyl-dark.png" width="49%" alt="TYL 深色界面">
@@ -54,6 +56,7 @@
 2. 按下 **Alt+T**。
 3. 查看词典释义或译文，按需切换引擎、复制结果，或在可编辑区域替换原文。
 4. 从托盘菜单进入设置或退出程序。
+5. 支持「快捷键翻译」与「划词自动翻译」
 
 > [!TIP]
 > Windows 11 通常已经包含 WebView2 Runtime；系统缺失时，安装包会调用微软引导程序联网安装。
@@ -75,7 +78,7 @@
 - 标签模式在首次切换时请求对应引擎；全部展开模式并行加载多个结果。
 
 
-默认提供必应、有道、腾讯 TranSmart、Yandex、金山和 Google 等免 Key 接入；也可以配置任意兼容 OpenAI `/chat/completions` 协议的 AI 服务。
+提供必应、有道、Yandex、金山和 Google 等免 Key 引擎，也可配置兼容 OpenAI `/chat/completions` 协议的 AI 服务。
 
 > [!NOTE]
 > 部分免 Key 引擎来自公开网页或移动端接口，不提供可用性 SLA，服务方调整后可能暂时不可用。需要稳定商用保障时，请配置正式 API 或自己的 OpenAI 兼容服务。

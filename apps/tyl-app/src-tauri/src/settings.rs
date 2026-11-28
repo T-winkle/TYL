@@ -5,6 +5,16 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerMode {
+    Automatic,
+    #[default]
+    #[serde(other)]
+    Hotkey,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -13,6 +23,7 @@ pub struct Settings {
     pub language: String,
     /// 全局热键（解析失败回退默认）。
     pub hotkey: String,
+    pub trigger_mode: TriggerMode,
     /// 启用的引擎（有序，第一个 = 主引擎/默认展示；弹窗 tab 顺序同此）。
     /// 可选 id 由 ENGINE_IDS 统一维护。
     pub engines: Vec<String>,
@@ -128,7 +139,8 @@ impl Default for Settings {
         Self {
             language: crate::i18n::SYSTEM.into(),
             hotkey: "alt+t".into(),
-            engines: vec!["bing".into(), "youdao".into(), "transmart".into()],
+            trigger_mode: TriggerMode::Hotkey,
+            engines: vec!["bing".into(), "youdao".into()],
             result_display: RESULT_DISPLAY_TABS.into(),
             language_routing: LanguageRoutingSettings::default(),
             theme: "system".into(),
@@ -193,15 +205,8 @@ pub fn settings_path() -> PathBuf {
 }
 
 /// 合法引擎 id。
-pub const ENGINE_IDS: [&str; 8] = [
-    "bing",
-    "youdao",
-    "transmart",
-    "yandex",
-    "iciba",
-    "google",
-    "mymemory",
-    "llm",
+pub const ENGINE_IDS: [&str; 7] = [
+    "bing", "youdao", "yandex", "iciba", "google", "mymemory", "llm",
 ];
 pub const RESULT_DISPLAY_TABS: &str = "tabs";
 pub const RESULT_DISPLAY_STACKED: &str = "stacked";
@@ -216,44 +221,39 @@ pub const DICTIONARY_AUTO: &str = "auto";
 pub const DICTIONARY_PROVIDERS: [&str; 4] = [DICTIONARY_AUTO, "youdao", "iciba", "bing"];
 pub const LANGUAGES: [&str; 3] = [crate::i18n::SYSTEM, crate::i18n::ZH_CN, crate::i18n::EN_US];
 
-/// 加载（缺失/损坏 → 默认值并写回）。启动时调用。
+/// 加载并规范化配置。启动时调用。
 pub fn load() -> Settings {
-    let mut s: Settings = std::fs::read_to_string(settings_path())
+    let s = std::fs::read_to_string(settings_path())
         .ok()
-        .and_then(|t| serde_json::from_str::<Settings>(&t).ok())
+        .map(|json| settings_from_json(&json))
         .unwrap_or_default();
+    *SETTINGS.write().unwrap() = Some(s.clone());
+    s
+}
 
-    // 迁移 v1（engine: String + engines: {开关}）→ v2（engines: Vec）：
-    // 旧主引擎 + 开着的对照引擎，保序；解析失败回默认。
-    if s.engines.is_empty() {
-        let legacy: Option<serde_json::Value> = std::fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok());
-        let mut list = Vec::new();
-        if let Some(v) = legacy {
-            if let Some(primary) = v.get("engine").and_then(|e| e.as_str()) {
-                if ENGINE_IDS.contains(&primary) {
-                    list.push(primary.to_string());
-                }
-            }
-            if let Some(cfg) = v.get("engines") {
-                for id in ENGINE_IDS {
-                    if cfg.get(id).and_then(|b| b.as_bool()) == Some(true)
-                        && !list.iter().any(|e| e == id)
-                    {
-                        list.push(id.to_string());
-                    }
-                }
-            }
-        }
-        if list.is_empty() {
-            list = Settings::default().engines;
-        }
-        s.engines = list;
+fn settings_from_json(json: &str) -> Settings {
+    let Ok(mut stored) = serde_json::from_str::<Value>(json) else {
+        return Settings::default();
+    };
+    // Migrate the legacy primary engine and toggle map before deserializing Settings.
+    if let Some(enabled) = stored
+        .get("engines")
+        .filter(|engines| engines.is_object() || engines.as_array().is_some_and(Vec::is_empty))
+    {
+        let primary = stored
+            .get("engine")
+            .and_then(Value::as_str)
+            .filter(|id| ENGINE_IDS.contains(id));
+        let engines: Vec<_> = primary
+            .into_iter()
+            .chain(ENGINE_IDS.into_iter().filter(|id| {
+                Some(*id) != primary && enabled.get(*id).and_then(Value::as_bool) == Some(true)
+            }))
+            .collect();
+        stored["engines"] = serde_json::json!(engines);
     }
-    // 清洗：去掉非法 id 与重复
-    s.engines.retain(|e| ENGINE_IDS.contains(&e.as_str()));
-    s.engines.dedup();
+    let mut s = serde_json::from_value::<Settings>(stored).unwrap_or_default();
+    retain_supported_engines(&mut s.engines);
     if s.engines.is_empty() {
         s.engines = Settings::default().engines;
     }
@@ -266,7 +266,6 @@ pub fn load() -> Settings {
         s.result_display = RESULT_DISPLAY_TABS.into();
     }
     normalize_appearance(&mut s);
-    *SETTINGS.write().unwrap() = Some(s.clone());
     s
 }
 
@@ -280,8 +279,7 @@ pub fn save(mut s: Settings) -> Result<(), String> {
     normalize_appearance(&mut s);
     normalize_dictionary(&mut s);
     normalize_language_routing(&mut s);
-    s.engines.retain(|e| ENGINE_IDS.contains(&e.as_str()));
-    s.engines.dedup();
+    retain_supported_engines(&mut s.engines);
     if s.engines.is_empty() {
         return Err("至少需要启用一个翻译引擎".into());
     }
@@ -301,6 +299,11 @@ pub fn save(mut s: Settings) -> Result<(), String> {
     *SETTINGS.write().unwrap() = Some(s.clone());
     crate::logger::set_level(s.log_level);
     Ok(())
+}
+
+fn retain_supported_engines(engines: &mut Vec<String>) {
+    engines.retain(|engine| ENGINE_IDS.contains(&engine.as_str()));
+    engines.dedup();
 }
 
 #[cfg(target_os = "macos")]
@@ -520,6 +523,54 @@ mod tests {
         assert!(!settings.show_source);
         assert!(!settings.gpu_acceleration);
         assert_eq!(settings.log_level, crate::logger::Level::Info);
+    }
+
+    #[test]
+    fn trigger_mode_round_trips_and_older_or_unknown_modes_keep_the_shortcut() {
+        for (json, expected) in [
+            (r#"{"hotkey":"ctrl+e"}"#, TriggerMode::Hotkey),
+            (
+                r#"{"hotkey":"ctrl+e","trigger_mode":"future"}"#,
+                TriggerMode::Hotkey,
+            ),
+            (
+                r#"{"hotkey":"ctrl+e","trigger_mode":"automatic"}"#,
+                TriggerMode::Automatic,
+            ),
+        ] {
+            let loaded = settings_from_json(json);
+            let restored = settings_from_json(&serde_json::to_string(&loaded).unwrap());
+            assert_eq!(restored.hotkey, "ctrl+e");
+            assert_eq!(restored.trigger_mode, expected);
+        }
+        assert_eq!(Settings::default().trigger_mode, TriggerMode::Hotkey);
+    }
+
+    #[test]
+    fn retired_transmart_is_removed_from_saved_engine_lists() {
+        for (json, expected) in [
+            (
+                r#"{"engines":["transmart","google","bing"]}"#,
+                ["google", "bing"],
+            ),
+            (r#"{"engines":["transmart"]}"#, ["bing", "youdao"]),
+        ] {
+            assert_eq!(settings_from_json(json).engines, expected);
+        }
+    }
+
+    #[test]
+    fn legacy_engine_map_preserves_enabled_engines_and_other_settings() {
+        let settings = settings_from_json(
+            r#"{"hotkey":"alt+e","engine":"transmart","engines":{"transmart":true,"yandex":true}}"#,
+        );
+        assert_eq!(settings.engines, ["yandex"]);
+        assert_eq!(settings.hotkey, "alt+e");
+        assert_eq!(settings.trigger_mode, TriggerMode::Hotkey);
+        assert_eq!(
+            settings_from_json(r#"{"engine":"google","engines":[]}"#).engines,
+            ["google"]
+        );
     }
 
     #[test]

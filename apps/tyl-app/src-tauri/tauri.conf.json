@@ -23,6 +23,7 @@
         "visible": false,
         "focus": true,
         "focusable": true,
+        "acceptFirstMouse": true,
         "decorations": false,
         "transparent": true,
         "shadow": false,
@@ -50,7 +51,7 @@
     "publisher": "zzy_joy",
     "copyright": "Copyright © 2026 zzy_joy",
     "category": "Productivity",
-    "shortDescription": "轻量、低延迟、不污染剪贴板的 Windows 划词翻译工具",
+    "shortDescription": "轻量、低延迟的桌面划词翻译工具",
     "longDescription": "TYL 优先通过 Windows UI Automation 直接读取选区，并提供低内存 WebView 生命周期、多翻译引擎、独立词典与安全替换能力。",
     "targets": [
       "nsis"

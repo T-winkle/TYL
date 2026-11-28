@@ -418,7 +418,10 @@ pub fn get_settings() -> crate::settings::Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: crate::settings::Settings) -> Result<(), String> {
+pub async fn save_settings(
+    app: AppHandle,
+    settings: crate::settings::Settings,
+) -> Result<(), String> {
     // 手动代理格式前置校验：错了当场报，不让用户带着坏代理静默直连。
     if settings.proxy.mode == "manual" {
         let url = settings.proxy.url.trim();
@@ -432,11 +435,13 @@ pub fn save_settings(app: AppHandle, settings: crate::settings::Settings) -> Res
             return Err("代理地址需以 http:// 或 socks5:// 开头".into());
         }
     }
-    #[cfg(target_os = "macos")]
-    crate::macos::save_with_hotkey(&app, settings)?;
-    #[cfg(not(target_os = "macos"))]
-    crate::settings::save(settings)?;
-    crate::refresh_tray_i18n(&app);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(crate::triggers::save(&handle, settings));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await.map_err(|e| e.to_string())??;
     // 代理变更 → 重建 HTTP client（下次请求生效新代理）
     crate::translate::reset_client();
     Ok(())

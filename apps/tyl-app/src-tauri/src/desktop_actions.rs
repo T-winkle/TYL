@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct TargetWindow {
     handle: usize,
     process_id: u32,

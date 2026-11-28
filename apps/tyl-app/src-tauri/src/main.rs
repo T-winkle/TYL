@@ -18,8 +18,10 @@ mod memory_bench;
 mod pipeline;
 mod platform_capture;
 mod runtime;
+mod selection_monitor;
 mod settings;
 mod translate;
+mod triggers;
 #[cfg(feature = "memory-bench")]
 mod visual_bench;
 mod webview_memory;
@@ -30,8 +32,6 @@ use std::sync::Arc;
 
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
-#[cfg(not(target_os = "macos"))]
-use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutEvent, ShortcutState};
 
 /// 前端就绪标志（就绪前管线不推送事件，避免丢首批取词）。
@@ -68,6 +68,9 @@ fn capture_shortcut_handler(
     let gesture = HotkeyGestureGate::default();
     move |app, _shortcut, event| match event.state() {
         ShortcutState::Pressed if gesture.begin_press() => {
+            if settings::current().trigger_mode != settings::TriggerMode::Hotkey {
+                return;
+            }
             if !app.state::<ReadyFlag>().0.load(Ordering::SeqCst) {
                 #[cfg(target_os = "macos")]
                 logger::warn("热键触发，但弹窗前端尚未就绪");
@@ -140,6 +143,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .manage(Arc::clone(&pipeline))
         .manage(ReadyFlag(AtomicBool::new(false)))
         .invoke_handler(tauri::generate_handler![
             commands::hide_popup,
@@ -183,6 +187,7 @@ fn main() {
             }
         })
         .setup({
+            #[cfg(feature = "memory-bench")]
             let pipeline = Arc::clone(&pipeline);
             move |app| {
                 // 弹窗样式 patch（TOOLWINDOW；不进 Alt+Tab）
@@ -205,6 +210,25 @@ fn main() {
                             logger::log_str("退出");
                             quit_app.exit(0);
                             std::process::exit(0);
+                        }
+                        "hotkey" | "automatic" => {
+                            let app = settings_app.clone();
+                            let mode = if event.id.as_ref() == "hotkey" {
+                                settings::TriggerMode::Hotkey
+                            } else {
+                                settings::TriggerMode::Automatic
+                            };
+                            let _ = settings_app.run_on_main_thread(move || {
+                                let mut cfg = settings::current();
+                                cfg.trigger_mode = mode;
+                                if let Err(error) = triggers::save(&app, cfg) {
+                                    logger::warn(&error);
+                                    refresh_tray_i18n(&app);
+                                    open_settings_window(&app);
+                                } else {
+                                    let _ = app.emit("tyl://trigger-mode", mode);
+                                }
+                            });
                         }
                         "settings" => {
                             logger::log_str("菜单: 打开设置");
@@ -231,17 +255,9 @@ fn main() {
                 let _ = tray;
                 logger::log_str("托盘已创建");
 
-                // 全局热键（设置里的值）→ 管线。
-                #[cfg(target_os = "macos")]
-                macos::install_hotkey(app.handle(), Arc::clone(&pipeline));
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let hotkey = settings::current().hotkey;
-                    app.global_shortcut().on_shortcut(
-                        hotkey.as_str(),
-                        capture_shortcut_handler(Arc::clone(&pipeline)),
-                    )?;
-                    logger::log_str(&format!("热键 {hotkey} 已注册"));
+                if let Err(error) = triggers::configure(app.handle(), &settings::current()) {
+                    logger::warn(&format!("注册翻译触发方式失败: {error}"));
+                    open_settings_window(app.handle());
                 }
 
                 #[cfg(feature = "memory-bench")]
@@ -319,7 +335,28 @@ fn build_tray_menu(
     app: &tauri::AppHandle,
     language: &str,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::CheckMenuItem;
+    let mode = settings::current().trigger_mode;
+    let hotkey = CheckMenuItem::with_id(
+        app,
+        "hotkey",
+        i18n::text(language, "快捷键翻译", "Shortcut translation"),
+        true,
+        mode == settings::TriggerMode::Hotkey,
+        None::<&str>,
+    )?;
+    let automatic = CheckMenuItem::with_id(
+        app,
+        "automatic",
+        i18n::text(language, "划词自动翻译", "Automatic selection translation"),
+        true,
+        mode == settings::TriggerMode::Automatic,
+        None::<&str>,
+    )?;
     tauri::menu::MenuBuilder::new(app)
+        .item(&hotkey)
+        .item(&automatic)
+        .separator()
         .text("settings", i18n::text(language, "设置…", "Settings…"))
         .separator()
         .text("quit", i18n::text(language, "退出", "Quit"))

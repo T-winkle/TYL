@@ -75,7 +75,6 @@ function engineLabel(id: string) {
   return {
     bing: tr("必应", "Bing"),
     youdao: tr("有道", "Youdao"),
-    transmart: tr("腾讯", "Tencent"),
     yandex: "Yandex",
     iciba: tr("金山", "Kingsoft"),
     mymemory: "MyMemory",
@@ -854,7 +853,7 @@ export function Popup() {
                                   captured()?.can_replace
                                     ? captured()?.replace_requires_verification
                                       ? tr("尝试替换原选区（先校验选中文本）", "Replace the original selection after verification")
-                                      : tr("用此译文替换原选区（不影响剪贴板历史）", "Replace the original selection without affecting clipboard history")
+                                      : tr("用此译文替换原选区", "Replace the original selection")
                                     : tr("原选区只读或无法确认可编辑，请复制译文", "The original selection is read-only or cannot be verified; copy the translation instead")
                                 }
                                 aria-label={`${tr("用", "Replace with")} ${engineLabel(id)} ${tr("译文替换原文", "translation")}`}
@@ -1040,7 +1039,7 @@ function ResultActions(props: {
           props.canReplace
             ? props.requiresVerification
               ? tr("尝试替换原选区（先校验选中文本）", "Replace the original selection after verification")
-              : tr("替换原选区（不影响剪贴板历史）", "Replace the original selection without affecting clipboard history")
+              : tr("替换原选区", "Replace the original selection")
             : tr("原选区只读或无法确认可编辑", "The original selection is read-only or cannot be verified")
         }
         aria-label={tr("用当前结果替换原文", "Replace source with current result")}

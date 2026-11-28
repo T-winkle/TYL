@@ -184,53 +184,80 @@ fn is_focused_edit_control(element: &IUIAutomationElement) -> bool {
 /// Some editors focus a child rather than the TextPattern owner. Search only a
 /// few ancestors, within the same process, never siblings or the entire desktop.
 pub fn focused_selection(uia: &IUIAutomation) -> Result<TextSelection, String> {
+    read_selection(uia)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "没有选中的文本".into())
+}
+
+pub(super) fn read_selection(
+    uia: &IUIAutomation,
+) -> Result<Option<TextSelection>, tyl_core::CaptureError> {
+    use tyl_core::CaptureError;
+    let unreadable = |why: &str| CaptureError::NoText(why.into());
     unsafe {
-        let mut owner = uia.GetFocusedElement().map_err(|_| "无法读取焦点控件")?;
-        let pid = owner.CurrentProcessId().map_err(|_| "无法确认原编辑器")?;
+        let mut owner = uia
+            .GetFocusedElement()
+            .map_err(|_| unreadable("无法读取焦点控件"))?;
+        let pid = owner
+            .CurrentProcessId()
+            .map_err(|_| unreadable("无法确认原编辑器"))?;
         let mut walker = None;
         for depth in 0..4 {
-            if owner.CurrentProcessId().ok() != Some(pid)
-                || owner.CurrentIsEnabled().ok().map(|v| v.as_bool()) != Some(true)
+            if owner.CurrentProcessId().ok() != Some(pid) {
+                break;
+            }
+            if owner.CurrentIsEnabled().ok().map(|v| v.as_bool()) != Some(true)
                 || owner.CurrentIsPassword().ok().map(|v| v.as_bool()) != Some(false)
             {
-                return Err("无法确认控件可用，或控件为密码输入框".into());
+                return Err(CaptureError::FallbackDisabled(
+                    "无法确认控件可用，或控件为密码输入框".into(),
+                ));
             }
             if let Ok(pattern) =
                 owner.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
             {
-                let ranges = pattern.GetSelection().map_err(|_| "无法读取选区")?;
-                let count = ranges.Length().map_err(|_| "无法读取选区数量")?;
+                let ranges = pattern
+                    .GetSelection()
+                    .map_err(|_| unreadable("无法读取选区"))?;
+                let count = ranges
+                    .Length()
+                    .map_err(|_| unreadable("无法读取选区数量"))?;
                 for index in 0..count {
-                    let range = ranges.GetElement(index).map_err(|_| "无法读取选区")?;
+                    let range = ranges
+                        .GetElement(index)
+                        .map_err(|_| unreadable("无法读取选区"))?;
                     let text = range
                         .GetText(-1)
-                        .map_err(|_| "无法读取选中文本")?
+                        .map_err(|_| unreadable("无法读取选中文本"))?
                         .to_string();
                     if !text.trim().is_empty() {
-                        return Ok(TextSelection {
+                        return Ok(Some(TextSelection {
                             owner,
                             range,
                             text,
                             count,
-                        });
+                        }));
                     }
                 }
                 // An explicit empty selection must not fall through to a parent's stale selection.
-                return Err("没有选中的文本".into());
+                return Ok(None);
             }
             if depth == 3 {
                 break;
             }
             let walker = match &walker {
                 Some(walker) => walker,
-                None => walker.insert(uia.ControlViewWalker().map_err(|_| "无法读取编辑器结构")?),
+                None => walker.insert(
+                    uia.ControlViewWalker()
+                        .map_err(|_| unreadable("无法读取编辑器结构"))?,
+                ),
             };
             owner = walker
                 .GetParentElement(&owner)
-                .map_err(|_| "此应用未提供可验证的选区")?;
+                .map_err(|_| unreadable("此应用未提供可验证的选区"))?;
         }
     }
-    Err("此应用未提供可验证的选区，请复制译文后粘贴".into())
+    Err(unreadable("此应用未提供可验证的选区，请复制译文后粘贴"))
 }
 
 /// An explicit read-only flag always wins. Missing range attributes

@@ -79,14 +79,42 @@ impl WinCapture {
     /// Runs the chain and returns a full outcome (used by CLI `--verbose`
     /// and app telemetry); `capture()` wraps it.
     pub fn capture_detailed(&self, anchor: &CaptureAnchor, deadline: Duration) -> CaptureOutcome {
+        self.capture_with_guard(anchor, deadline, None)
+    }
+
+    pub fn capture_mouse_selection(
+        &self,
+        anchor: &CaptureAnchor,
+        deadline: Duration,
+        current: impl Fn() -> bool,
+    ) -> CaptureOutcome {
+        self.capture_with_guard(anchor, deadline, Some(&current))
+    }
+
+    fn capture_with_guard(
+        &self,
+        anchor: &CaptureAnchor,
+        deadline: Duration,
+        mouse: Option<&dyn Fn() -> bool>,
+    ) -> CaptureOutcome {
         let plan = (self.plan_for)(anchor.target_exe.as_deref());
         let uia_budget = deadline.min(Duration::from_millis(300));
 
         match plan {
             ChannelPlan::ClipboardOnly => {}
             ChannelPlan::UiaOnly | ChannelPlan::UiaThenClipboard => {
-                match self.uia.capture(anchor, uia_budget) {
+                match self.uia.capture_at(mouse.and(anchor.cursor), uia_budget) {
                     Ok(t) => return CaptureOutcome::Primary(t),
+                    Err(e @ CaptureError::FallbackDisabled(_)) if mouse.is_some() => {
+                        return CaptureOutcome::Failed(e)
+                    }
+                    Err(e)
+                        if mouse.is_some()
+                            && !matches!(e, CaptureError::NoText(_))
+                            && !anchor.cursor.is_some_and(anchor::native_text_selection) =>
+                    {
+                        return CaptureOutcome::Failed(e)
+                    }
                     Err(e) => {
                         clipboard_fallback::trace_log(&format!(
                             "[uia] 取词失败，准备降级剪贴板: {e}"
@@ -115,7 +143,12 @@ impl WinCapture {
 
         // Clipboard fallback consumes the rest of the budget.
         let fallback_budget = deadline.max(Duration::from_millis(500));
-        match self.fallback.capture(anchor, fallback_budget) {
+        if mouse.is_some() && (anchor.cursor.is_none() || anchor.target_exe.is_none()) {
+            return CaptureOutcome::Failed(CaptureError::FallbackDisabled(
+                "unknown selection target".into(),
+            ));
+        }
+        match self.fallback.capture_guarded(fallback_budget, mouse) {
             Ok(mut t) => {
                 if t.editable.is_none() {
                     t.editable = self.uia.probe_focused_editable(Duration::from_millis(180));

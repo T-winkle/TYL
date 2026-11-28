@@ -12,7 +12,7 @@
 //!
 //! 窗口尺寸/位置仍走 Tauri API（物理像素），显示前先定位避免跳变。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{Emitter, WebviewWindow};
 
@@ -125,6 +125,47 @@ pub fn patch_window_style(w: &WebviewWindow) {
     }
 }
 
+static PASSIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn passive_visible() -> bool {
+    PASSIVE.load(Ordering::Acquire)
+}
+
+/// Main thread. Keep passive native show/hide paired; Tao tracks its own visibility flags.
+pub fn show_passive(w: &WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    if let Ok(hwnd) = w.hwnd() {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    } else {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(ptr) = w.ns_window() {
+        unsafe {
+            (&*ptr.cast::<objc2_app_kit::NSWindow>()).orderFrontRegardless();
+        }
+    } else {
+        return;
+    }
+    FOCUS_REVISION.fetch_add(1, Ordering::SeqCst);
+    PASSIVE.store(true, Ordering::Release);
+}
+
+pub fn hide_passive(w: &WebviewWindow) {
+    let revision = FOCUS_REVISION.load(Ordering::Acquire);
+    if passive_visible() {
+        let popup = w.clone();
+        let _ = w.run_on_main_thread(move || {
+            if passive_visible() && FOCUS_REVISION.load(Ordering::Acquire) == revision {
+                hide(&popup);
+            }
+        });
+    }
+}
+
 /// 定位并显示（激活聚焦）。pipeline 在取词完成后调用。
 /// Tauri 的 show()/set_focus() 走标准激活路径——顺系统而行。
 pub fn show_focused(w: &WebviewWindow) {
@@ -139,6 +180,18 @@ pub fn show_focused(w: &WebviewWindow) {
 pub fn hide(w: &WebviewWindow) {
     FOCUS_REVISION.fetch_add(1, Ordering::SeqCst);
     crate::logger::log_str("hide");
+    let passive = PASSIVE.swap(false, Ordering::AcqRel);
+    #[cfg(target_os = "windows")]
+    if passive {
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        if let Ok(hwnd) = w.hwnd() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = passive;
     if w.hide().is_ok() {
         let _ = w.emit("tyl://popup-hidden", ());
         crate::webview_memory::hidden(w);

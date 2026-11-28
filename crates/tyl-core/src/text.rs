@@ -24,9 +24,10 @@ pub fn normalize_selection(text: &str) -> String {
             if paragraph {
                 // Blank runs copied from rendered pages are commonly layout
                 // artifacts. Outside code fences collapse any run to the same
-                // single natural line boundary; fenced content keeps one blank
-                // line because whitespace can be semantically significant.
-                output.push_str(if fence.is_some() { "\n\n" } else { "\n" });
+                // single natural line boundary. Keep a blank line in a fence
+                // or where a single newline would suggest a split word.
+                let keep_blank = fence.is_some() || is_visible_hyphen_wrap(previous, clean);
+                output.push_str(if keep_blank { "\n\n" } else { "\n" });
             } else if fence.is_none()
                 && marker.is_none()
                 && !looks_structured(clean)
@@ -35,6 +36,10 @@ pub fn normalize_selection(text: &str) -> String {
                 && clean.chars().next().is_some_and(char::is_alphabetic)
             {
                 // An explicit discretionary hyphen identifies a broken word.
+            } else if fence.is_none() && marker.is_none() && is_visible_hyphen_wrap(previous, clean)
+            {
+                // Some readers copy a printed line-break hyphen as ordinary text.
+                output.pop();
             } else if fence.is_none() && marker.is_none() && is_layout_wrap(previous, clean) {
                 if !(output.chars().last().is_some_and(is_cjk)
                     && clean.chars().next().is_some_and(is_cjk))
@@ -66,6 +71,33 @@ pub fn normalize_selection(text: &str) -> String {
         paragraph = false;
     }
     output
+}
+
+fn is_visible_hyphen_wrap(previous: &str, next: &str) -> bool {
+    let Some(before_hyphen) = previous.trim_end().strip_suffix(['-', '\u{2010}']) else {
+        return false;
+    };
+    if previous.ends_with("  ") || looks_structured(previous) || looks_structured(next) {
+        return false;
+    }
+
+    let left = before_hyphen
+        .split_whitespace()
+        .next_back()
+        .unwrap_or_default()
+        .trim_start_matches(['(', '"', '\'', '“', '‘']);
+    let right = next
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || "‐”’。！？、）".contains(c));
+    // Plain text has no discretionary-break metadata for a visible hyphen.
+    // Treat adjacent lowercase continuations with letter-only fragments as a wrap.
+    left.ends_with(char::is_lowercase)
+        && right.starts_with(char::is_lowercase)
+        && [left, right].into_iter().all(|fragment| {
+            fragment.chars().nth(1).is_some() && fragment.chars().all(char::is_alphabetic)
+        })
 }
 
 fn is_layout_wrap(previous: &str, next: &str) -> bool {
@@ -140,6 +172,35 @@ mod tests {
         );
         assert_eq!(normalize_selection("state-of-the-art"), "state-of-the-art");
         assert_eq!(normalize_selection("\r\n \t"), "");
+    }
+
+    #[test]
+    fn rejoins_words_split_by_visible_hyphens() {
+        assert_eq!(normalize_selection("syn-\r\nthesize"), "synthesize");
+        assert_eq!(
+            normalize_selection("More generally, we can syn\u{2010}\nthesize noise."),
+            "More generally, we can synthesize noise."
+        );
+        assert_eq!(
+            normalize_selection("\"syn-\nthe-\nsize\""),
+            "\"synthesize\""
+        );
+    }
+
+    #[test]
+    fn keeps_visible_hyphens_at_authored_boundaries() {
+        for sample in [
+            "well-known",
+            "syn-  \nthesize",
+            "syn-\n\nthesize",
+            "- syn-\n- thesize",
+            "```text\nsyn-\nthesize\n```",
+            "LC-\nfilter",
+            "state-of-\nthe-art",
+            "year-\n2026",
+        ] {
+            assert_eq!(normalize_selection(sample), sample);
+        }
     }
 
     #[test]

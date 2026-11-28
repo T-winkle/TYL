@@ -15,7 +15,10 @@
 //!   call back into our apartment.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,7 +26,7 @@ use tyl_core::locator::Rect;
 use tyl_core::{CaptureAnchor, CaptureError, CaptureSource, CapturedText, TextCapture};
 
 use super::uia_selection::{
-    focused_control_editable, focused_selection, selection_editable, selection_identity,
+    focused_control_editable, read_selection, selection_editable, selection_identity,
     OwnedSafeArray,
 };
 use windows::core::Interface;
@@ -40,11 +43,14 @@ const UIA_SOFT_DEADLINE: Duration = Duration::from_millis(300);
 /// Worker busy longer than this is presumed hung → replace the thread.
 const HARD_HANG_RECOVERY: Duration = Duration::from_secs(5);
 
+#[derive(Clone)]
+struct MouseQuery {
+    point: tyl_core::locator::Point,
+    text_target: Arc<AtomicBool>,
+}
+
 struct CaptureJob {
-    /// Reserved: the UIA query targets the focused element, so the anchor
-    /// currently rides along for diagnostics/future targeting only.
-    #[allow(dead_code)]
-    anchor: CaptureAnchor,
+    mouse: Option<MouseQuery>,
     reply: Sender<Result<CapturedText, CaptureError>>,
 }
 
@@ -128,9 +134,9 @@ fn sta_thread_main(rx: Receiver<Job>, busy: Arc<Mutex<Option<Instant>>>) {
         *busy.lock().unwrap() = Some(Instant::now());
 
         match job {
-            Job::Capture(CaptureJob { reply, .. }) => {
+            Job::Capture(CaptureJob { reply, mouse }) => {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    capture_via_uia(&uia)
+                    capture_via_uia(&uia, mouse)
                 }))
                 .unwrap_or_else(|_| Err(CaptureError::Channel("UIA worker panicked".into())));
                 let _ = reply.send(result);
@@ -187,9 +193,94 @@ fn pump_messages() {
 }
 
 /// The actual UIA query — STA thread only.
-fn capture_via_uia(uia: &IUIAutomation) -> Result<CapturedText, CaptureError> {
+fn mouse_text_target(
+    uia: &IUIAutomation,
+    point: tyl_core::locator::Point,
+) -> Result<bool, CaptureError> {
+    use windows::Win32::{
+        Foundation::POINT,
+        UI::{Accessibility::*, WindowsAndMessaging::*},
+    };
+    unsafe {
+        let Ok(hit) = uia.ElementFromPoint(POINT {
+            x: point.x,
+            y: point.y,
+        }) else {
+            return Ok(false);
+        };
+        let Ok(focus) = uia.GetFocusedElement() else {
+            return Ok(false);
+        };
+        let Ok(pid) = hit.CurrentProcessId() else {
+            return Ok(false);
+        };
+        if Some(pid) != focus.CurrentProcessId().ok() {
+            return Ok(false);
+        }
+        for element in [&hit, &focus] {
+            match (
+                element.CurrentIsEnabled().ok().map(|v| v.as_bool()),
+                element.CurrentIsPassword().ok().map(|v| v.as_bool()),
+            ) {
+                (Some(false), _) | (_, Some(true)) => {
+                    return Err(CaptureError::FallbackDisabled(
+                        "protected or disabled text target".into(),
+                    ))
+                }
+                (Some(true), Some(false)) => {}
+                _ => return Ok(false),
+            }
+        }
+        let Ok(role) = hit.CurrentControlType() else {
+            return Ok(false);
+        };
+        if [
+            UIA_TextControlTypeId,
+            UIA_EditControlTypeId,
+            UIA_DocumentControlTypeId,
+            UIA_HyperlinkControlTypeId,
+        ]
+        .contains(&role)
+        {
+            return Ok(true);
+        }
+        // Opaque PDF/editor surfaces often expose just a pane plus the system text cursor.
+        let mut cursor = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        Ok([
+            UIA_CustomControlTypeId,
+            UIA_PaneControlTypeId,
+            UIA_WindowControlTypeId,
+        ]
+        .contains(&role)
+            && GetCursorInfo(&mut cursor).is_ok()
+            && LoadCursorW(None, IDC_IBEAM).ok() == Some(cursor.hCursor))
+    }
+}
+
+fn capture_via_uia(
+    uia: &IUIAutomation,
+    mouse: Option<MouseQuery>,
+) -> Result<CapturedText, CaptureError> {
     let start = Instant::now();
-    let selection = focused_selection(uia).map_err(CaptureError::NoText)?;
+    if let Some(mouse) = &mouse {
+        if !mouse_text_target(uia, mouse.point)? {
+            return Err(CaptureError::Channel(
+                "mouse text target unavailable".into(),
+            ));
+        }
+        mouse.text_target.store(true, Ordering::Release);
+    }
+    let selection = match read_selection(uia) {
+        Ok(Some(selected)) => selected,
+        Ok(None) if mouse.is_some() => {
+            return Err(CaptureError::Channel("empty UIA selection".into()))
+        }
+        Err(e) => return Err(e),
+        Ok(None) => return Err(CaptureError::NoText("没有选中的文本".into())),
+    };
     let editable = selection_editable(uia, &selection);
     let selection_id = if editable == Some(true) {
         selection_identity(&selection)
@@ -260,9 +351,21 @@ impl UiaCapture {
 
     pub fn capture(
         &self,
-        anchor: &CaptureAnchor,
+        _anchor: &CaptureAnchor,
         deadline: Duration,
     ) -> Result<CapturedText, CaptureError> {
+        self.capture_at(None, deadline)
+    }
+
+    pub(super) fn capture_at(
+        &self,
+        mouse: Option<tyl_core::locator::Point>,
+        deadline: Duration,
+    ) -> Result<CapturedText, CaptureError> {
+        let mouse = mouse.map(|point| MouseQuery {
+            point,
+            text_target: Arc::new(AtomicBool::new(false)),
+        });
         let deadline = deadline.min(UIA_SOFT_DEADLINE);
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
 
@@ -272,7 +375,7 @@ impl UiaCapture {
                 *guard = Worker::spawn(); // wedged → fresh STA thread
             }
             let job = Job::Capture(CaptureJob {
-                anchor: anchor.clone(),
+                mouse: mouse.clone(),
                 reply: reply_tx.clone(),
             });
             if guard.tx.send(job).is_err() {
@@ -280,7 +383,7 @@ impl UiaCapture {
                 guard
                     .tx
                     .send(Job::Capture(CaptureJob {
-                        anchor: anchor.clone(),
+                        mouse: mouse.clone(),
                         reply: reply_tx,
                     }))
                     .map_err(|_| CaptureError::Channel("UIA worker unreachable".into()))?;
@@ -298,7 +401,16 @@ impl UiaCapture {
                         *busy = Some(Instant::now());
                     }
                 }
-                Err(CaptureError::NoText("UIA deadline exceeded".into()))
+                if mouse
+                    .as_ref()
+                    .is_none_or(|m| m.text_target.load(Ordering::Acquire))
+                {
+                    Err(CaptureError::NoText("UIA deadline exceeded".into()))
+                } else {
+                    Err(CaptureError::Channel(
+                        "mouse target could not be verified".into(),
+                    ))
+                }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 Err(CaptureError::Channel("UIA worker died".into()))

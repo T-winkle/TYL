@@ -8,11 +8,12 @@ const colorScheme = query.get("scheme") ?? "indigo";
 const language = query.get("lang") ?? "zh-CN";
 const scenario = query.get("case") ?? "dict";
 const engines = query.get("allEngines") === "true"
-  ? ["bing", "youdao", "transmart", "yandex", "iciba", "google", "mymemory", "llm"]
-  : ["bing", "youdao", "transmart"];
+  ? ["bing", "youdao", "yandex", "iciba", "google", "mymemory", "llm"]
+  : ["bing", "youdao"];
 const cfg = {
   language,
   hotkey: "alt+t",
+  trigger_mode: "hotkey",
   engines,
   result_display: "tabs",
   theme,

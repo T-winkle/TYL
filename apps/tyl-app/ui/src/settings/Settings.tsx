@@ -6,6 +6,7 @@ import {
   Show,
   For,
 } from "solid-js";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon, type IconName } from "../shared/Icon";
@@ -49,6 +50,7 @@ interface LanguageRoutingSettings {
 interface SettingsData {
   language: LanguagePreference;
   hotkey: string;
+  trigger_mode: "hotkey" | "automatic";
   /** 有序启用引擎；第一个 = 主引擎（弹窗 tab 顺序同此） */
   engines: string[];
   result_display: "tabs" | "stacked";
@@ -70,7 +72,7 @@ interface GpuStatus {
 }
 
 interface MacCaptureStatus {
-  registered: boolean;
+  registered: boolean | null;
   accessibility: boolean;
 }
 
@@ -80,7 +82,6 @@ type Tab = "general" | "translate" | "network" | "llm";
 const ALL_ENGINE_IDS = [
   "bing",
   "youdao",
-  "transmart",
   "yandex",
   "iciba",
   "google",
@@ -92,7 +93,6 @@ function engineMeta(id: string): { label: string; desc: string } {
   return {
     bing: { label: tr("必应", "Bing"), desc: tr("通用文本与日常阅读", "General text and everyday reading") },
     youdao: { label: tr("有道", "Youdao"), desc: tr("短文本翻译，免配置内部接口", "Short text via a key-free internal endpoint") },
-    transmart: { label: tr("腾讯", "Tencent"), desc: tr("长句与技术文本", "Long sentences and technical text") },
     yandex: { label: "Yandex", desc: tr("多语言及长文翻译，免配置", "Key-free multilingual and long-text translation") },
     iciba: { label: tr("金山", "Kingsoft"), desc: tr("中短文本，国内访问较快", "Short and medium text; fast access in China") },
     google: { label: "Google", desc: tr("多语言翻译，部分网络需代理", "Multilingual translation; some networks require a proxy") },
@@ -179,6 +179,7 @@ export function Settings() {
     network: 0,
     llm: 0,
   };
+  let unlistenMode: Promise<UnlistenFn> | undefined;
   let removeRecording: (() => void) | undefined;
   const dirty = () => Boolean(s()) && JSON.stringify(s()) !== saved();
   const refreshMacCaptureStatus = async () => {
@@ -212,10 +213,18 @@ export function Settings() {
     removeContextMenu();
     removeWindowDrag();
     removeRecording?.();
+    void unlistenMode?.then(remove => remove());
     if (isMac) window.removeEventListener("focus", refreshMacCaptureStatus);
   });
 
   onMount(async () => {
+    unlistenMode = listen<SettingsData["trigger_mode"]>("tyl://trigger-mode", ({payload}) => {
+      if (!s()) return;
+      cancelRecord();
+      patch({ trigger_mode: payload });
+      setSaved(prev => JSON.stringify({ ...JSON.parse(prev), trigger_mode: payload }));
+      void refreshMacCaptureStatus();
+    });
     removeContextMenu = installContextMenuGuard();
     if (isMac) window.addEventListener("focus", refreshMacCaptureStatus);
     const cancelDrag = () => {
@@ -538,7 +547,7 @@ export function Settings() {
               </Show>
               <Show when={macCaptureStatus()?.accessibility === false}>
                 <div class="settings-message capture-permission" role="status">
-                  <span>{tr("划词翻译需要辅助功能权限。请在系统设置中启用 TYL，再选中文字并按下快捷键。", "Selection translation needs Accessibility permission. Enable TYL in System Settings, then select text and use your shortcut.")}</span>
+                  <span>{tr("请在系统设置中允许 TYL 通过辅助功能读取选中文字。", "Allow TYL to read selected text in System Settings → Accessibility.")}</span>
                   <div class="capture-actions">
                     <button class="test-connection" type="button" onClick={() => {
                       void invoke("open_accessibility_settings").catch((e) =>
@@ -642,32 +651,46 @@ export function Settings() {
                     </div>
                   </section>
                   <section class="group">
-                    <div class="group-title">{tr("划词热键", "Capture shortcut")}</div>
-                    <div class="row">
-                      <div class="row-text">
-                        <div class="label">{tr("触发组合键", "Keyboard shortcut")}</div>
-                        <div class="hint">{isMac
-                          ? tr("保存后立即生效", "Takes effect when saved")
-                          : tr("保存后重启应用生效", "Restart the app after saving")}</div>
-                      </div>
-                      <button
-                        class={`hotkey-btn ${recording() ? "recording" : ""}`}
-                        onClick={() =>
-                          recording() ? cancelRecord() : startRecord()
-                        }
-                      >
-                        {recording()
-                          ? tr("按下组合键…（Esc 取消）", "Press a key combination… (Esc to cancel)")
-                          : formatHotkey(cur().hotkey) || tr("未设置", "Not set")}
-                      </button>
+                    <div class="group-title">{tr("翻译触发方式", "Translation trigger")}</div>
+                    <div class="seg" role="radiogroup" aria-label={tr("翻译触发方式", "Translation trigger")}>
+                      <For each={["hotkey", "automatic"] as const}>{mode =>
+                        <button type="button" role="radio" aria-checked={cur().trigger_mode === mode}
+                          classList={{ active: cur().trigger_mode === mode }}
+                          onClick={() => {
+                            cancelRecord();
+                            patch({ trigger_mode: mode });
+                          }}>
+                          {mode === "hotkey" ? tr("快捷键翻译", "Keyboard shortcut") : tr("划词自动翻译", "Automatic selection")}
+                        </button>
+                      }</For>
                     </div>
-                    <p class="hint">
-                      {isMac
-                        ? tr("默认热键为 Option+T。", "The default shortcut is Option+T.")
-                        : tr("建议 Alt/Shift 系组合，避免与常用软件冲突。", "Alt or Shift combinations are less likely to conflict with other apps.")}
-                    </p>
-                    <Show when={macCaptureStatus()?.registered === false}>
-                      <p class="hint warn" role="status">{tr("快捷键注册失败，请选择另一个组合并保存。", "The shortcut could not be registered. Choose another combination and save.")}</p>
+                    <Show when={cur().trigger_mode === "hotkey"} fallback={
+                      <p class="hint">{tr("双击或拖选文字，松手后自动显示结果。选中文字会发送给当前配置的词典或翻译服务。", "Double-click or drag to select text. Your configured dictionary or translation service receives the selection on release.")}</p>
+                    }>
+                      <div class="row">
+                        <div class="row-text">
+                          <div class="label">{tr("触发组合键", "Keyboard shortcut")}</div>
+                          <div class="hint">{tr("保存后立即生效", "Takes effect when saved")}</div>
+                        </div>
+                        <button
+                          class={`hotkey-btn ${recording() ? "recording" : ""}`}
+                          onClick={() =>
+                            recording() ? cancelRecord() : startRecord()
+                          }
+                        >
+                          {recording()
+                            ? tr("按下组合键…（Esc 取消）", "Press a key combination… (Esc to cancel)")
+                            : formatHotkey(cur().hotkey) || tr("未设置", "Not set")}
+                        </button>
+                      </div>
+                      <p class="hint">
+                        {isMac
+                          ? tr("默认热键为 Option+T。", "The default shortcut is Option+T.")
+                          : tr("建议 Alt/Shift 系组合，避免与常用软件冲突。", "Alt or Shift combinations are less likely to conflict with other apps.")}
+                      </p>
+                      <Show when={macCaptureStatus()?.registered === false}>
+                        <p class="hint warn" role="status">{tr("快捷键注册失败，请选择另一个组合并保存。", "The shortcut could not be registered. Choose another combination and save.")}</p>
+                      </Show>
                     </Show>
                   </section>
 

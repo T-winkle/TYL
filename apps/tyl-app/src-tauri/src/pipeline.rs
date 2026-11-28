@@ -98,7 +98,7 @@ pub struct TranslateEvent {
     /// "start" | "chunk" | "done" | "error" | "dict"
     pub phase: &'static str,
     pub text: String,
-    /// 使用的服务（"bing" / "youdao" / "transmart" / "llm" / "dict"…）。
+    /// 使用的服务（"bing" / "youdao" / "llm" / "dict"…）。
     pub service: String,
     pub translation_revision: u64,
 }
@@ -111,6 +111,7 @@ pub struct Pipeline {
     generation: Arc<AtomicU64>,
     /// 平台取词单飞锁。翻译请求可以并行，但 UIA/剪贴板取词不能重叠。
     capture_in_flight: AtomicBool,
+    capture_lock: Mutex<()>,
     /// 共享 tokio runtime（翻译请求）。
     rt: tokio::runtime::Handle,
 }
@@ -121,7 +122,27 @@ impl Pipeline {
             capture: crate::platform_capture::spawn_capture(),
             generation: Arc::new(AtomicU64::new(0)),
             capture_in_flight: AtomicBool::new(false),
+            capture_lock: Mutex::new(()),
             rt: crate::runtime::handle(),
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn invalidate(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn on_selection(
+        &self,
+        app: &AppHandle,
+        gen: u64,
+        selection: crate::selection_monitor::Selection,
+    ) {
+        if let Err(e) = run_capture_and_show(app.clone(), self, gen, Some(selection)) {
+            crate::logger::warn(&e);
         }
     }
 
@@ -136,6 +157,7 @@ impl Pipeline {
             return;
         }
 
+        let gen = pipeline.invalidate();
         std::thread::spawn(move || {
             struct CaptureFlightGuard<'a>(&'a AtomicBool);
             impl Drop for CaptureFlightGuard<'_> {
@@ -144,10 +166,9 @@ impl Pipeline {
                 }
             }
             let _flight = CaptureFlightGuard(&pipeline.capture_in_flight);
-            let gen = pipeline.generation.fetch_add(1, Ordering::SeqCst) + 1;
             #[cfg(target_os = "windows")]
             crate::desktop_actions::invalidate();
-            if let Err(e) = run_capture_and_show(app, &pipeline, gen) {
+            if let Err(e) = run_capture_and_show(app, &pipeline, gen, None) {
                 crate::logger::error(&format!("[tyl] pipeline error: {e}"));
             }
         });
@@ -381,7 +402,6 @@ pub async fn run_engine(
     match engine {
         "bing" => translate::bing::translate(text, source, target).await,
         "youdao" => translate::youdao::translate(text, source, target).await,
-        "transmart" => translate::transmart::translate(text, source, target).await,
         "yandex" => translate::yandex::translate(text, source, target).await,
         "iciba" => translate::iciba::translate(text, source, target).await,
         "mymemory" => translate::mymemory::translate(text, source, target).await,
@@ -491,10 +511,50 @@ fn translate_llm(
     }
 }
 
-fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result<(), String> {
+fn run_capture_and_show(
+    app: AppHandle,
+    pipeline: &Pipeline,
+    gen: u64,
+    selection: Option<crate::selection_monitor::Selection>,
+) -> Result<(), String> {
+    let _capture = pipeline.capture_lock.lock().unwrap();
+    let current = || {
+        pipeline.revision() == gen
+            && selection.is_none_or(|s| crate::selection_monitor::foreground() == s.target)
+    };
+    if !current() {
+        return Ok(());
+    }
     let cfg = crate::settings::current();
+    if (cfg.trigger_mode == crate::settings::TriggerMode::Automatic) != selection.is_some() {
+        return Ok(());
+    }
+    let present = |window: &tauri::WebviewWindow| {
+        let revision = pipeline.generation.clone();
+        let popup = window.clone();
+        window
+            .run_on_main_thread(move || {
+                if revision.load(Ordering::Acquire) != gen {
+                    return;
+                }
+                match selection {
+                    Some(point) if crate::selection_monitor::foreground() == point.target => {
+                        window_ctl::show_passive(&popup)
+                    }
+                    None => window_ctl::show_focused(&popup),
+                    _ => {}
+                }
+            })
+            .map_err(|e| e.to_string())
+    };
     // 1. 锚点（在取词前快照；DPI 感知在启动时已声明）
-    let anchor = crate::platform_capture::capture_anchor();
+    let mut anchor = crate::platform_capture::capture_anchor();
+    if let Some(point) = selection {
+        anchor.cursor = Some(Point {
+            x: point.x,
+            y: point.y,
+        });
+    }
     #[cfg(target_os = "windows")]
     let target_window = crate::desktop_actions::foreground();
     crate::logger::log_str(&format!(
@@ -504,9 +564,19 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
 
     // 2. 取词（平台实现；stub 平台返回 Err）
     let started = std::time::Instant::now();
-    let outcome = pipeline
-        .capture
-        .capture_detailed(&anchor, Duration::from_millis(800));
+    let timeout = Duration::from_millis(800);
+    #[cfg(target_os = "windows")]
+    let outcome = if selection.is_some() {
+        pipeline
+            .capture
+            .capture_mouse_selection(&anchor, timeout, || {
+                current() && target_window == crate::desktop_actions::foreground()
+            })
+    } else {
+        pipeline.capture.capture_detailed(&anchor, timeout)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let outcome = pipeline.capture.capture_detailed(&anchor, timeout);
     crate::logger::log_str(&format!(
         "[gen {gen}] 取词完成 {:?}ms: {}",
         started.elapsed().as_millis(),
@@ -519,7 +589,7 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
     ));
 
     // 3. 过期检查：用户在取词期间又按了热键 → 这次结果作废
-    if pipeline.generation.load(Ordering::SeqCst) != gen {
+    if !current() {
         crate::logger::log_str(&format!("[gen {gen}] 已过期，丢弃"));
         return Ok(());
     }
@@ -530,6 +600,16 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
 
     match outcome {
         CaptureOutcome::Primary(t) | CaptureOutcome::Fallback(t) => {
+            #[cfg(target_os = "macos")]
+            if selection.zip(t.selection_rect).is_some_and(|(end, rect)| {
+                // Dragging a title bar can leave the previous AX selection intact.
+                end.x < rect.left.saturating_sub(8)
+                    || end.x > rect.right.saturating_add(8)
+                    || end.y < rect.top.saturating_sub(8)
+                    || end.y > rect.bottom.saturating_add(8)
+            }) {
+                return Ok(());
+            }
             let text = tyl_core::text::normalize_selection(&t.text);
             if text.is_empty() {
                 return Ok(());
@@ -607,6 +687,9 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
                 #[cfg(feature = "memory-bench")]
                 benchmark: false,
             };
+            if !current() {
+                return Ok(());
+            }
             let _ = app.emit("tyl://captured", event);
 
             // 6.5 翻译与窗口显示并行：网络往返（100ms+）不等渲染，
@@ -615,12 +698,13 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
 
             // 给前端一帧的渲染时间（事件监听 + SolidJS 细粒度更新）。
             std::thread::sleep(Duration::from_millis(30));
-            window_ctl::show_focused(&window);
+            present(&window)?;
             #[cfg(target_os = "macos")]
             crate::logger::info(&format!("[gen {gen}] [macOS] 已取词并打开翻译弹窗"));
             crate::logger::log_str(&format!("[gen {gen}] 事件已推送，窗口已显示"));
             Ok(())
         }
+        CaptureOutcome::Failed(_) if selection.is_some() => Ok(()),
         CaptureOutcome::Failed(e) => {
             crate::logger::warn(&format!("[gen {gen}] 取词失败: {e}"));
             #[cfg(target_os = "macos")]
@@ -644,7 +728,7 @@ fn run_capture_and_show(app: AppHandle, pipeline: &Pipeline, gen: u64) -> Result
                     )
                     .map_err(|error| error.to_string())?;
                 std::thread::sleep(Duration::from_millis(30));
-                window_ctl::show_focused(&window);
+                present(&window)?;
                 crate::logger::info(&format!("[gen {gen}] [macOS] 已显示取词授权提示"));
             }
             Ok(())
@@ -767,18 +851,13 @@ mod tests {
     #[test]
     fn fallback_engines_preserve_enabled_order_and_skip_llm() {
         let cfg = crate::settings::Settings {
-            engines: vec![
-                "llm".into(),
-                "transmart".into(),
-                "bing".into(),
-                "youdao".into(),
-            ],
+            engines: vec!["llm".into(), "iciba".into(), "bing".into(), "youdao".into()],
             ..Default::default()
         };
 
         assert_eq!(
             fallback_engine_ids(&cfg, Some("bing")),
-            vec!["transmart", "youdao"]
+            vec!["iciba", "youdao"]
         );
     }
 
